@@ -175,6 +175,48 @@ select:focus-visible,
   background: #000;
 }
 
+.viewer-center-overlay {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  pointer-events: none;
+}
+
+.viewer-center-button {
+  width: 88px;
+  height: 88px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid var(--border);
+  background: rgba(10, 10, 11, 0.88);
+  color: var(--text);
+  pointer-events: auto;
+}
+
+.viewer-center-button:disabled {
+  cursor: default;
+  color: var(--text);
+  border-color: var(--border);
+}
+
+.viewer-center-icon {
+  font-size: 2rem;
+  line-height: 1;
+  transform: translateX(2px);
+}
+
+.spinner {
+  width: 28px;
+  height: 28px;
+  border: 2px solid rgba(255, 255, 255, 0.18);
+  border-top-color: var(--accent);
+  border-right-color: var(--accent);
+  border-radius: 50%;
+  animation: spin 0.85s linear infinite;
+}
+
 .viewer-overlay {
   position: absolute;
   left: 0;
@@ -456,6 +498,16 @@ dd {
 .about-dialog-form h2,
 .about-dialog-form p {
   margin: 0;
+}
+
+@keyframes spin {
+  from {
+    transform: rotate(0deg);
+  }
+
+  to {
+    transform: rotate(360deg);
+  }
 }
 
 @media (max-width: 1080px) {

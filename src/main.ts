@@ -84,6 +84,12 @@ function mount(): void {
         <section class="viewer-section">
           <div class="viewer-stage">
             <video id="media-element" playsinline preload="metadata"></video>
+            <div id="viewer-center-overlay" class="viewer-center-overlay" hidden>
+              <button id="viewer-center-button" class="viewer-center-button" type="button" aria-label="Start playback">
+                <span id="viewer-center-spinner" class="spinner" hidden aria-hidden="true"></span>
+                <span id="viewer-center-icon" class="viewer-center-icon" aria-hidden="true">▶</span>
+              </button>
+            </div>
 
             <div class="viewer-overlay">
               <div class="control-strip">
@@ -177,6 +183,22 @@ function mount(): void {
 
   const fileInput = requireElement(app.querySelector<HTMLInputElement>('#file-input'), 'File input not found');
   const mediaElement = requireElement(app.querySelector<HTMLVideoElement>('#media-element'), 'Media element not found');
+  const viewerCenterOverlay = requireElement(
+    app.querySelector<HTMLDivElement>('#viewer-center-overlay'),
+    'Viewer center overlay not found',
+  );
+  const viewerCenterButton = requireElement(
+    app.querySelector<HTMLButtonElement>('#viewer-center-button'),
+    'Viewer center button not found',
+  );
+  const viewerCenterSpinner = requireElement(
+    app.querySelector<HTMLElement>('#viewer-center-spinner'),
+    'Viewer center spinner not found',
+  );
+  const viewerCenterIcon = requireElement(
+    app.querySelector<HTMLElement>('#viewer-center-icon'),
+    'Viewer center icon not found',
+  );
   const fileMenuButton = requireElement(app.querySelector<HTMLButtonElement>('#file-menu-button'), 'File menu button not found');
   const helpMenuButton = requireElement(app.querySelector<HTMLButtonElement>('#help-menu-button'), 'Help menu button not found');
   const fileMenu = requireElement(app.querySelector<HTMLDivElement>('#file-menu'), 'File menu not found');
@@ -309,6 +331,24 @@ function mount(): void {
     const isMuted = mediaElement.muted || mediaElement.volume === 0;
     muteButton.setAttribute('aria-label', isMuted ? 'Unmute' : 'Mute');
     muteIcon.textContent = isMuted ? '🔇' : '🔊';
+    const isLoadingPhase =
+      state.playbackPhase === 'probing' ||
+      state.playbackPhase === 'transcoding' ||
+      state.playbackPhase === 'attaching' ||
+      state.playbackPhase === 'buffering' ||
+      state.status === 'seeking';
+    const showCenteredPlay =
+      Boolean(state.file) &&
+      !isLoadingPhase &&
+      state.playbackPhase !== 'playing' &&
+      state.status !== 'playing' &&
+      !state.error;
+
+    viewerCenterOverlay.hidden = !isLoadingPhase && !showCenteredPlay;
+    viewerCenterSpinner.hidden = !isLoadingPhase;
+    viewerCenterIcon.hidden = !showCenteredPlay;
+    viewerCenterButton.disabled = isLoadingPhase;
+    viewerCenterButton.setAttribute('aria-label', isLoadingPhase ? 'Loading media' : 'Start playback');
 
     supportHint.textContent =
       state.browserSupported === null
@@ -445,6 +485,15 @@ function mount(): void {
     }
 
     controller.pause();
+  });
+
+  viewerCenterButton.addEventListener('click', async (event) => {
+    event.stopPropagation();
+    if (!currentState.file || viewerCenterButton.disabled) {
+      return;
+    }
+
+    await controller.play();
   });
 
   window.addEventListener('beforeunload', () => {

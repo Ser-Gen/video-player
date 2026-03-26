@@ -1,5 +1,6 @@
 export type PlaybackMode = 'auto' | 'browser' | 'ffmpeg';
 export type ResolvedEngine = 'browser' | 'ffmpeg';
+export type ProbeStatus = 'idle' | 'running' | 'completed' | 'failed';
 export type PlaybackPhase =
   | 'idle'
   | 'probing'
@@ -94,6 +95,8 @@ export interface PlayerState {
   lastPlaybackError: PlaybackErrorInfo | null;
   ffmpegTimings: DiagnosticTimings;
   attachTimings: DiagnosticTimings;
+  probeStatus: ProbeStatus;
+  activeProbeRequestId: number | null;
 }
 
 export interface CapabilityDetection {

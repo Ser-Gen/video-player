@@ -106,6 +106,13 @@ class DeferredProbeFFmpegService extends MockFFmpegService {
   }
 }
 
+class FailingProbeFFmpegService extends MockFFmpegService {
+  override async probe(): Promise<MediaInfo> {
+    this.probeCalls += 1;
+    throw new Error('Probe crashed');
+  }
+}
+
 describe('resolvePlaybackEngine', () => {
   it('prefers browser in auto mode when supported', () => {
     expect(resolvePlaybackEngine('auto', true)).toBe('browser');
@@ -167,10 +174,11 @@ describe('BrowserMediaPlayerController', () => {
   it('chooses browser playback for supported files in auto mode', async () => {
     const mediaElement = document.createElement('video');
     const probeElement = document.createElement('video');
+    const ffmpegService = new DeferredProbeFFmpegService();
     vi.spyOn(probeElement, 'canPlayType').mockReturnValue('probably');
 
     const controller = new BrowserMediaPlayerController(mediaElement, {
-      ffmpegService: new MockFFmpegService(),
+      ffmpegService,
       probeElement,
     });
 
@@ -178,6 +186,13 @@ describe('BrowserMediaPlayerController', () => {
 
     expect(controller.state.resolvedEngine).toBe('browser');
     expect(controller.state.browserSupported).toBe(true);
+    expect(controller.state.playbackPhase).toBe('ready');
+    expect(controller.state.probeStatus).toBe('running');
+
+    ffmpegService.resolveProbe();
+    await Promise.resolve();
+
+    expect(controller.state.probeStatus).toBe('completed');
   });
 
   it('uses ffmpeg fallback for unsupported files and reruns transcode on seek', async () => {
@@ -251,7 +266,7 @@ describe('BrowserMediaPlayerController', () => {
 
     const openPromise = controller.openFile(new File(['x'], 'clip.mkv', { type: '' }));
     await Promise.resolve();
-    expect(['transcoding', 'seeking']).toContain(controller.state.status);
+    expect(['probing', 'transcoding', 'seeking']).toContain(controller.state.status);
 
     await controller.play();
     expect(playSpy).not.toHaveBeenCalled();
@@ -293,5 +308,25 @@ describe('BrowserMediaPlayerController', () => {
     expect(playSpy).toHaveBeenCalledTimes(1);
     expect(controller.state.playbackPhase).toBe('playing');
     expect(controller.state.diagnostics.some((entry) => entry.stage === 'media.pause')).toBe(true);
+  });
+
+  it('keeps browser playback usable when background probe fails', async () => {
+    const mediaElement = document.createElement('video');
+    const probeElement = document.createElement('video');
+    vi.spyOn(probeElement, 'canPlayType').mockReturnValue('probably');
+
+    const controller = new BrowserMediaPlayerController(mediaElement, {
+      ffmpegService: new FailingProbeFFmpegService(),
+      probeElement,
+    });
+
+    await controller.openFile(new File(['x'], 'clip.mp4', { type: 'video/mp4' }));
+    await Promise.resolve();
+
+    expect(controller.state.resolvedEngine).toBe('browser');
+    expect(controller.state.playbackPhase).toBe('ready');
+    expect(controller.state.status).toBe('paused');
+    expect(controller.state.error).toBeNull();
+    expect(controller.state.probeStatus).toBe('failed');
   });
 });

@@ -249,6 +249,11 @@ function mount(): void {
   }
 
   function renderMediaInfo(state: PlayerState): void {
+    if (!state.mediaInfo && state.probeStatus === 'running') {
+      mediaInfo.innerHTML = `<div><dt>FFmpeg info</dt><dd>Collecting in background...</dd></div>`;
+      return;
+    }
+
     const info = state.mediaInfo;
     const entries = [
       ['Container', info?.container ?? '-'],
@@ -271,6 +276,7 @@ function mount(): void {
       ['Engine', state.resolvedEngine ?? '-'],
       ['Status', state.status],
       ['Phase', state.playbackPhase],
+      ['Probe', state.probeStatus],
       ['Current', formatTime(state.currentTimeSec)],
       ['Total', formatTime(state.durationSec)],
     ];
@@ -284,9 +290,16 @@ function mount(): void {
     const lastError = state.lastPlaybackError
       ? `${state.lastPlaybackError.code}: ${state.lastPlaybackError.message}`
       : 'none';
+    const probeState =
+      state.probeStatus === 'running'
+        ? 'Collecting FFmpeg info...'
+        : state.probeStatus === 'failed'
+          ? 'Background probe failed'
+          : state.probeStatus;
 
     diagSummary.innerHTML = `
       <div><dt>Last error</dt><dd>${lastError}</dd></div>
+      <div><dt>Probe status</dt><dd>${probeState}</dd></div>
       <div><dt>FFmpeg timing</dt><dd>${ffmpegMs === '-' ? '-' : `${ffmpegMs} ms`}</dd></div>
       <div><dt>Attach timing</dt><dd>${attachMs === '-' ? '-' : `${attachMs} ms`}</dd></div>
       <div><dt>Delivery mode</dt><dd>${state.transcodeSession?.deliveryMode ?? '-'}</dd></div>
@@ -332,7 +345,7 @@ function mount(): void {
     muteButton.setAttribute('aria-label', isMuted ? 'Unmute' : 'Mute');
     muteIcon.textContent = isMuted ? '🔇' : '🔊';
     const isLoadingPhase =
-      state.playbackPhase === 'probing' ||
+      (state.playbackPhase === 'probing' && state.resolvedEngine === 'ffmpeg') ||
       state.playbackPhase === 'transcoding' ||
       state.playbackPhase === 'attaching' ||
       state.playbackPhase === 'buffering' ||
@@ -354,7 +367,9 @@ function mount(): void {
       state.browserSupported === null
         ? 'Open a local file from File > Open File.'
         : state.browserSupported
-          ? 'Native browser playback is available for this file. FFmpeg mode can still be forced.'
+          ? state.probeStatus === 'running'
+            ? 'Native browser playback is ready. FFmpeg metadata is still being collected in the background.'
+            : 'Native browser playback is available for this file. FFmpeg mode can still be forced.'
           : 'Native browser playback was not detected. FFmpeg fallback is active by default.';
 
     errorBox.textContent = state.error ?? '';

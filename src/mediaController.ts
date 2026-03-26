@@ -59,6 +59,8 @@ function createInitialState(): PlayerState {
     lastPlaybackError: null,
     ffmpegTimings: emptyTimings(),
     attachTimings: emptyTimings(),
+    probeStatus: 'idle',
+    activeProbeRequestId: null,
   };
 }
 
@@ -69,6 +71,7 @@ export class BrowserMediaPlayerController implements PlayerController {
   private objectUrl: string | null = null;
   private mediaSource: MediaSource | null = null;
   private transcodeToken = 0;
+  private probeToken = 0;
   private pendingFfmpegSeek: number | null = null;
   private shouldAutoplayWhenReady = false;
   private disposed = false;
@@ -101,19 +104,24 @@ export class BrowserMediaPlayerController implements PlayerController {
   async openFile(file: File): Promise<void> {
     this.revokeObjectUrl();
     this.shouldAutoplayWhenReady = false;
+    const requestProbeId = ++this.probeToken;
     const capability = detectCapability(file, this.probeElement);
     this.pauseMediaElement('openFile:reset-before-load');
     this.mediaElement.removeAttribute('src');
     this.mediaElement.load();
+    const resolvedEngine = resolvePlaybackEngine(this.state.playbackMode, capability.browserSupported);
 
     this.setState(() => ({
       ...createInitialState(),
       file,
       playbackMode: this.state.playbackMode,
+      resolvedEngine,
       browserSupported: capability.browserSupported,
-      status: 'probing',
-      playbackPhase: 'probing',
+      status: resolvedEngine === 'browser' ? 'paused' : 'probing',
+      playbackPhase: resolvedEngine === 'browser' ? 'ready' : 'probing',
       isAudioOnly: capability.isAudioOnly,
+      probeStatus: 'running',
+      activeProbeRequestId: requestProbeId,
     }));
     this.pushDiagnostic('session', 'Opened media file', file.name);
     this.pushDiagnostic(
@@ -122,43 +130,16 @@ export class BrowserMediaPlayerController implements PlayerController {
       `browserSupported=${capability.browserSupported}; audioOnly=${capability.isAudioOnly}`,
     );
 
-    const probeStartedAt = Date.now();
-    this.setState((prev) => ({
-      ...prev,
-      ffmpegTimings: {
-        startedAt: probeStartedAt,
-        finishedAt: null,
-        durationMs: null,
-      },
-    }));
-    this.pushDiagnostic('ffmpeg.probe', 'Starting FFmpeg probe');
-
-    let mediaInfo = null;
-    try {
-      mediaInfo = await this.ffmpegService.probe(file);
-    } catch (error) {
-      const message = error instanceof Error ? error.message : 'Failed to probe the media file';
-      this.applyPlaybackError('attach_failed', message);
-      throw error;
+    if (resolvedEngine === 'browser') {
+      this.loadBrowserSource(file, 0);
+      void this.runBackgroundProbe(file, requestProbeId);
+      return;
     }
 
-    const probeFinishedAt = Date.now();
-    this.pushDiagnostic('ffmpeg.probe', 'FFmpeg probe completed', `${probeFinishedAt - probeStartedAt}ms`);
-    const resolvedEngine = resolvePlaybackEngine(this.state.playbackMode, capability.browserSupported);
-    this.setState((prev) => ({
-      ...prev,
-      mediaInfo,
-      durationSec: mediaInfo.durationSec,
-      resolvedEngine,
-      status: 'probing',
-      playbackPhase: 'probing',
-      error: null,
-      ffmpegTimings: {
-        startedAt: probeStartedAt,
-        finishedAt: probeFinishedAt,
-        durationMs: probeFinishedAt - probeStartedAt,
-      },
-    }));
+    const probeSucceeded = await this.runBlockingProbe(file, requestProbeId);
+    if (!probeSucceeded) {
+      return;
+    }
 
     await this.applyCurrentMode(0, false);
   }
@@ -171,6 +152,10 @@ export class BrowserMediaPlayerController implements PlayerController {
       lastPlaybackError: null,
     }));
     this.pushDiagnostic('session', 'Playback mode changed', mode);
+
+    if (mode === 'ffmpeg') {
+      this.probeToken += 1;
+    }
 
     await this.applyCurrentMode(this.state.currentTimeSec, false);
   }
@@ -462,6 +447,114 @@ export class BrowserMediaPlayerController implements PlayerController {
       playbackPhase: 'ready',
       error: null,
     }));
+  }
+
+  private async runBlockingProbe(file: File, requestId: number): Promise<boolean> {
+    const probeStartedAt = Date.now();
+    this.setState((prev) => ({
+      ...prev,
+      probeStatus: 'running',
+      activeProbeRequestId: requestId,
+      ffmpegTimings: {
+        startedAt: probeStartedAt,
+        finishedAt: null,
+        durationMs: null,
+      },
+    }));
+    this.pushDiagnostic('ffmpeg.probe', 'Starting FFmpeg probe');
+
+    try {
+      const mediaInfo = await this.ffmpegService.probe(file);
+      if (requestId !== this.probeToken) {
+        return false;
+      }
+
+      const probeFinishedAt = Date.now();
+      this.pushDiagnostic('ffmpeg.probe', 'FFmpeg probe completed', `${probeFinishedAt - probeStartedAt}ms`);
+      this.setState((prev) => ({
+        ...prev,
+        mediaInfo,
+        durationSec: mediaInfo.durationSec ?? prev.durationSec,
+        error: null,
+        probeStatus: 'completed',
+        activeProbeRequestId: requestId,
+        ffmpegTimings: {
+          startedAt: probeStartedAt,
+          finishedAt: probeFinishedAt,
+          durationMs: probeFinishedAt - probeStartedAt,
+        },
+      }));
+      return true;
+    } catch (error) {
+      if (requestId !== this.probeToken) {
+        return false;
+      }
+      const message = error instanceof Error ? error.message : 'Failed to probe the media file';
+      this.applyPlaybackError('attach_failed', message);
+      this.setState((prev) => ({
+        ...prev,
+        probeStatus: 'failed',
+        activeProbeRequestId: requestId,
+      }));
+      return false;
+    }
+  }
+
+  private async runBackgroundProbe(file: File, requestId: number): Promise<void> {
+    const probeStartedAt = Date.now();
+    this.setState((prev) => ({
+      ...prev,
+      probeStatus: 'running',
+      activeProbeRequestId: requestId,
+      ffmpegTimings: {
+        startedAt: probeStartedAt,
+        finishedAt: null,
+        durationMs: null,
+      },
+    }));
+    this.pushDiagnostic('ffmpeg.probe.background', 'Starting background FFmpeg probe');
+
+    try {
+      const mediaInfo = await this.ffmpegService.probe(file);
+      if (requestId !== this.probeToken || this.state.file !== file) {
+        return;
+      }
+
+      const probeFinishedAt = Date.now();
+      this.pushDiagnostic(
+        'ffmpeg.probe.background',
+        'Background FFmpeg probe completed',
+        `${probeFinishedAt - probeStartedAt}ms`,
+      );
+      this.setState((prev) => ({
+        ...prev,
+        mediaInfo,
+        durationSec: prev.durationSec ?? mediaInfo.durationSec,
+        probeStatus: 'completed',
+        activeProbeRequestId: requestId,
+        ffmpegTimings: {
+          startedAt: probeStartedAt,
+          finishedAt: probeFinishedAt,
+          durationMs: probeFinishedAt - probeStartedAt,
+        },
+      }));
+    } catch (error) {
+      if (requestId !== this.probeToken || this.state.file !== file) {
+        return;
+      }
+      const message = error instanceof Error ? error.message : 'Background FFmpeg probe failed';
+      this.pushDiagnostic('ffmpeg.probe.background', 'Background FFmpeg probe failed', message);
+      this.setState((prev) => ({
+        ...prev,
+        probeStatus: 'failed',
+        activeProbeRequestId: requestId,
+        ffmpegTimings: {
+          startedAt: probeStartedAt,
+          finishedAt: Date.now(),
+          durationMs: Date.now() - probeStartedAt,
+        },
+      }));
+    }
   }
 
   private setState(updater: (state: PlayerState) => PlayerState): void {

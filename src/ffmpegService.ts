@@ -4,7 +4,6 @@ import { parseMediaInfoFromLogs } from './ffmpegLogParser';
 import type { MediaInfo } from './types';
 
 const INPUT_FILE = '/input';
-const PROBE_OUTPUT = '/probe-null';
 const OUTPUT_FILE = '/output.mp4';
 const SEGMENT_LENGTH_SEC = 20;
 const OUTPUT_MIME = 'video/mp4; codecs="avc1.42E01E, mp4a.40.2"';
@@ -74,9 +73,10 @@ export class FFmpegService {
     await this.writeInput(file);
 
     try {
-      await ffmpeg.exec(['-hide_banner', '-i', INPUT_FILE, '-f', 'null', PROBE_OUTPUT]);
+      await ffmpeg.exec(['-hide_banner', '-i', INPUT_FILE]);
     } catch {
-      // Probe via stderr is still usable even when ffmpeg exits with a decode error.
+      // We intentionally stop after input inspection. FFmpeg prints stream/container
+      // metadata before exiting with "At least one output file must be specified".
     }
 
     return parseMediaInfoFromLogs(this.currentLogs);

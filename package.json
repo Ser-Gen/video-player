@@ -6,7 +6,6 @@
   "scripts": {
     "dev": "vite",
     "build": "tsc -b && vite build",
-    "build:subdir": "tsc -b && BASE_PATH=/dist/ vite build",
     "preview": "vite preview",
     "test": "vitest run",
     "test:watch": "vitest"

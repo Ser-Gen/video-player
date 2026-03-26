@@ -215,6 +215,26 @@ describe('BrowserMediaPlayerController', () => {
     expect(controller.state.diagnostics.some((entry) => entry.stage === 'attach')).toBe(true);
   });
 
+  it('can reopen the same file object after prior ffmpeg playback', async () => {
+    const mediaElement = document.createElement('video');
+    const probeElement = document.createElement('video');
+    const ffmpegService = new MockFFmpegService();
+    vi.spyOn(probeElement, 'canPlayType').mockReturnValue('');
+    const file = new File(['x'], 'clip.mkv', { type: '' });
+
+    const controller = new BrowserMediaPlayerController(mediaElement, {
+      ffmpegService,
+      probeElement,
+    });
+
+    await controller.openFile(file);
+    await controller.openFile(file);
+
+    expect(ffmpegService.transcodeCalls).toEqual([0, 0]);
+    expect(controller.state.file).toBe(file);
+    expect(controller.state.resolvedEngine).toBe('ffmpeg');
+  });
+
   it('stops browser playback and resets time to zero', async () => {
     const mediaElement = document.createElement('video');
     const probeElement = document.createElement('video');

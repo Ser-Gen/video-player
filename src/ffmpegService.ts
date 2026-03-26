@@ -77,6 +77,8 @@ export class FFmpegService {
     } catch {
       // We intentionally stop after input inspection. FFmpeg prints stream/container
       // metadata before exiting with "At least one output file must be specified".
+    } finally {
+      await this.cleanupTempFiles(INPUT_FILE);
     }
 
     return parseMediaInfoFromLogs(this.currentLogs);
@@ -141,26 +143,30 @@ export class FFmpegService {
       );
     }
 
-    await ffmpeg.exec(args);
-    const bytes = await ffmpeg.readFile(OUTPUT_FILE);
-    const blobPayload =
-      typeof bytes === 'string'
-        ? new TextEncoder().encode(bytes)
-        : (() => {
-            const copy = new Uint8Array(bytes.byteLength);
-            copy.set(bytes);
-            return copy.buffer;
-          })();
-    const mediaInfo = parseMediaInfoFromLogs(this.currentLogs);
+    try {
+      await ffmpeg.exec(args);
+      const bytes = await ffmpeg.readFile(OUTPUT_FILE);
+      const blobPayload =
+        typeof bytes === 'string'
+          ? new TextEncoder().encode(bytes)
+          : (() => {
+              const copy = new Uint8Array(bytes.byteLength);
+              copy.set(bytes);
+              return copy.buffer;
+            })();
+      const mediaInfo = parseMediaInfoFromLogs(this.currentLogs);
 
-    return {
-      blob: new Blob([blobPayload], {
-        type: isAudioOnly ? OUTPUT_AUDIO_MIME : OUTPUT_MIME,
-      }),
-      mimeType: isAudioOnly ? OUTPUT_AUDIO_MIME : OUTPUT_MIME,
-      mediaInfo,
-      segmentDurationSec: SEGMENT_LENGTH_SEC,
-    };
+      return {
+        blob: new Blob([blobPayload], {
+          type: isAudioOnly ? OUTPUT_AUDIO_MIME : OUTPUT_MIME,
+        }),
+        mimeType: isAudioOnly ? OUTPUT_AUDIO_MIME : OUTPUT_MIME,
+        mediaInfo,
+        segmentDurationSec: SEGMENT_LENGTH_SEC,
+      };
+    } finally {
+      await this.cleanupTempFiles(INPUT_FILE, OUTPUT_FILE);
+    }
   }
 
   private async writeInput(file: File): Promise<void> {
@@ -179,5 +185,9 @@ export class FFmpegService {
     } catch {
       // Ignore missing files in the in-memory FS.
     }
+  }
+
+  private async cleanupTempFiles(...paths: string[]): Promise<void> {
+    await Promise.all(paths.map((path) => this.safeDelete(path)));
   }
 }

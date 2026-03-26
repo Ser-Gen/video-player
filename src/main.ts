@@ -1,14 +1,46 @@
 import './styles.css';
 import { BrowserMediaPlayerController } from './mediaController';
 import { getAdjacentIndexAfterRemoval, markPlaylistItemPlayed, movePlaylistItem, setCurrentPlaylistItem, type PlaylistItem } from './playlist';
-import type { PlaybackMode, PlayerState, RightPanelTab } from './types';
+import type {
+  PlaybackMode,
+  PlayerState,
+  PresetCycleIntervalSec,
+  RightPanelTab,
+  VisualizationSettings,
+  VisualizationSupportState,
+} from './types';
 import { formatTime, timelineRatioFromClientX, timelineTimeFromRatio } from './uiHelpers';
+import { loadVisualizationPresetCatalog } from './visualizationLoader';
+import { pickRandomPresetId, type VisualizationPresetCategory, type VisualizationPresetEntry } from './visualizationPresets';
+import { readStoredVisualizationSettings, writeStoredVisualizationSettings } from './visualizationStorage';
+import { ButterchurnVisualizerAdapter } from './visualizer';
+
+type MenuName = 'file' | 'view' | 'help' | null;
+type ViewSubmenu = 'preset' | 'cycle' | `preset-category:${string}` | null;
+
+const VOLUME_STORAGE_KEY = 'video-player:volume-settings';
+const CYCLE_INTERVAL_OPTIONS: Array<{ value: PresetCycleIntervalSec; label: string }> = [
+  { value: null, label: 'Off' },
+  { value: 30, label: '30 sec' },
+  { value: 60, label: '1 min' },
+  { value: 120, label: '2 min' },
+  { value: 300, label: '5 min' },
+];
 
 function requireElement<T extends Element>(value: T | null, message: string): T {
   if (!value) {
     throw new Error(message);
   }
   return value;
+}
+
+function escapeHtml(value: string): string {
+  return value
+    .replaceAll('&', '&amp;')
+    .replaceAll('<', '&lt;')
+    .replaceAll('>', '&gt;')
+    .replaceAll('"', '&quot;')
+    .replaceAll("'", '&#39;');
 }
 
 async function copyToClipboard(text: string): Promise<void> {
@@ -51,8 +83,6 @@ function bindCopyButton(button: HTMLButtonElement, getText: () => string): void 
   });
 }
 
-const VOLUME_STORAGE_KEY = 'video-player:volume-settings';
-
 function readStoredVolumeSettings(): { volume: number; muted: boolean } | null {
   try {
     const rawValue = window.localStorage.getItem(VOLUME_STORAGE_KEY);
@@ -94,6 +124,30 @@ function writeStoredVolumeSettings(volume: number, muted: boolean): void {
   }
 }
 
+function normalizeVisualizationSettings(
+  settings: VisualizationSettings,
+  availablePresetEntries: VisualizationPresetEntry[],
+): VisualizationSettings {
+  const fallbackPresetId = availablePresetEntries[0]?.id ?? settings.selectedPresetId ?? null;
+  const selectedPresetId =
+    settings.selectedPresetId && availablePresetEntries.some((entry) => entry.id === settings.selectedPresetId)
+      ? settings.selectedPresetId
+      : fallbackPresetId;
+
+  return {
+    ...settings,
+    selectedPresetId,
+  };
+}
+
+function intervalLabel(interval: PresetCycleIntervalSec): string {
+  return CYCLE_INTERVAL_OPTIONS.find((option) => option.value === interval)?.label ?? '1 min';
+}
+
+function categorySubmenuId(categoryId: string): ViewSubmenu {
+  return `preset-category:${categoryId}`;
+}
+
 function mount(): void {
   const app = document.querySelector<HTMLDivElement>('#app');
   if (!app) {
@@ -119,6 +173,16 @@ function mount(): void {
             <div id="view-menu" class="menu-dropdown" hidden>
               <button id="playlist-toggle-button" class="menu-action" type="button">Playlist</button>
               <button id="debug-toggle-button" class="menu-action" type="button">Debug</button>
+              <button id="visualization-toggle-button" class="menu-action" type="button">Visualization for Video</button>
+              <div class="menu-submenu-wrap">
+                <button id="preset-menu-button" class="menu-action menu-action--submenu" type="button" aria-haspopup="true" aria-expanded="false">Preset</button>
+                <div id="preset-menu" class="menu-dropdown menu-dropdown--submenu" hidden></div>
+              </div>
+              <div class="menu-submenu-wrap">
+                <button id="cycle-menu-button" class="menu-action menu-action--submenu" type="button" aria-haspopup="true" aria-expanded="false">Auto Change Preset</button>
+                <div id="cycle-menu" class="menu-dropdown menu-dropdown--submenu" hidden></div>
+              </div>
+              <button id="next-random-preset-button" class="menu-action" type="button">Next Random Preset</button>
             </div>
           </div>
           <div class="menu-item-wrap">
@@ -138,6 +202,7 @@ function mount(): void {
           <div class="viewer-stage">
             <div class="viewer-media-surface">
               <video id="media-element" playsinline preload="metadata"></video>
+              <canvas id="visualization-canvas" class="visualization-canvas" hidden aria-label="Audio visualization"></canvas>
               <div id="viewer-center-overlay" class="viewer-center-overlay" hidden>
                 <button id="viewer-center-button" class="viewer-center-button" type="button" aria-label="Start playback">
                   <span id="viewer-center-spinner" class="spinner" hidden aria-hidden="true"></span>
@@ -254,12 +319,21 @@ function mount(): void {
           <button class="control-button accent" type="submit">Close</button>
         </form>
       </dialog>
+
+      <dialog id="visualization-dialog" class="about-dialog">
+        <form method="dialog" class="about-dialog-form">
+          <h2>Visualization Unavailable</h2>
+          <p id="visualization-dialog-message">Visualization is unavailable.</p>
+          <button class="control-button accent" type="submit">Close</button>
+        </form>
+      </dialog>
     </main>
   `;
 
   const openFileInput = requireElement(app.querySelector<HTMLInputElement>('#open-file-input'), 'Open file input not found');
   const playlistFileInput = requireElement(app.querySelector<HTMLInputElement>('#playlist-file-input'), 'Playlist file input not found');
   const mediaElement = requireElement(app.querySelector<HTMLVideoElement>('#media-element'), 'Media element not found');
+  const visualizationCanvas = requireElement(app.querySelector<HTMLCanvasElement>('#visualization-canvas'), 'Visualization canvas not found');
   const viewerCenterOverlay = requireElement(app.querySelector<HTMLDivElement>('#viewer-center-overlay'), 'Viewer center overlay not found');
   const viewerCenterButton = requireElement(app.querySelector<HTMLButtonElement>('#viewer-center-button'), 'Viewer center button not found');
   const viewerCenterSpinner = requireElement(app.querySelector<HTMLElement>('#viewer-center-spinner'), 'Viewer center spinner not found');
@@ -274,8 +348,28 @@ function mount(): void {
   const addFilesButton = requireElement(app.querySelector<HTMLButtonElement>('#add-files-button'), 'Add files button not found');
   const playlistToggleButton = requireElement(app.querySelector<HTMLButtonElement>('#playlist-toggle-button'), 'Playlist toggle button not found');
   const debugToggleButton = requireElement(app.querySelector<HTMLButtonElement>('#debug-toggle-button'), 'Debug toggle button not found');
+  const visualizationToggleButton = requireElement(
+    app.querySelector<HTMLButtonElement>('#visualization-toggle-button'),
+    'Visualization toggle button not found',
+  );
+  const presetMenuButton = requireElement(app.querySelector<HTMLButtonElement>('#preset-menu-button'), 'Preset menu button not found');
+  const presetMenu = requireElement(app.querySelector<HTMLDivElement>('#preset-menu'), 'Preset menu not found');
+  const cycleMenuButton = requireElement(app.querySelector<HTMLButtonElement>('#cycle-menu-button'), 'Cycle menu button not found');
+  const cycleMenu = requireElement(app.querySelector<HTMLDivElement>('#cycle-menu'), 'Cycle menu not found');
+  const nextRandomPresetButton = requireElement(
+    app.querySelector<HTMLButtonElement>('#next-random-preset-button'),
+    'Next random preset button not found',
+  );
   const aboutButton = requireElement(app.querySelector<HTMLButtonElement>('#about-button'), 'About button not found');
   const aboutDialog = requireElement(app.querySelector<HTMLDialogElement>('#about-dialog'), 'About dialog not found');
+  const visualizationDialog = requireElement(
+    app.querySelector<HTMLDialogElement>('#visualization-dialog'),
+    'Visualization dialog not found',
+  );
+  const visualizationDialogMessage = requireElement(
+    app.querySelector<HTMLElement>('#visualization-dialog-message'),
+    'Visualization dialog message not found',
+  );
   const previousButton = requireElement(app.querySelector<HTMLButtonElement>('#previous-button'), 'Previous button not found');
   const playToggleButton = requireElement(app.querySelector<HTMLButtonElement>('#play-toggle-button'), 'Play toggle button not found');
   const playToggleIcon = requireElement(app.querySelector<HTMLElement>('#play-toggle-icon'), 'Play toggle icon not found');
@@ -310,8 +404,18 @@ function mount(): void {
   const errorBox = requireElement(app.querySelector<HTMLElement>('#error-box'), 'Error box not found');
 
   const controller = new BrowserMediaPlayerController(mediaElement);
+  const visualizer = new ButterchurnVisualizerAdapter(visualizationCanvas);
+  const storedVolumeSettings = readStoredVolumeSettings();
+  let presetEntries: VisualizationPresetEntry[] = [];
+  let presetCategories: VisualizationPresetCategory[] = [];
+  let presetCatalogStatus: 'idle' | 'loading' | 'ready' | 'failed' = 'idle';
+  let presetCatalogError: string | null = null;
+  let presetCatalogPromise: Promise<void> | null = null;
+  let visualizationSettings = normalizeVisualizationSettings(readStoredVisualizationSettings(), presetEntries);
+  let visualizationSupportState: VisualizationSupportState = visualizer.supportState;
   let currentState: PlayerState = controller.state;
-  let activeMenu: 'file' | 'view' | 'help' | null = null;
+  let activeMenu: MenuName = null;
+  let activeViewSubmenu: ViewSubmenu = null;
   let hoverTimeSec: number | null = null;
   let hoverRatio = 0;
   let rightPanelTab: RightPanelTab = 'playlist';
@@ -321,13 +425,83 @@ function mount(): void {
   let playlistCounter = 0;
   let draggedPlaylistItemId: string | null = null;
   let autoAdvanceInProgress = false;
+  let presetCycleTimeoutId: number | null = null;
+  let presetCycleKey: string | null = null;
+  let loadedPresetId: string | null = null;
 
-  const storedVolumeSettings = readStoredVolumeSettings();
   mediaElement.volume = storedVolumeSettings?.volume ?? 1;
   mediaElement.muted = storedVolumeSettings?.muted ?? false;
   volumeInput.value = `${Math.round((mediaElement.muted ? 0 : mediaElement.volume) * 100)}`;
   bindCopyButton(copyDiagButton, () => diagOutput.textContent ?? '');
   bindCopyButton(copyLogsButton, () => logsOutput.textContent ?? '');
+
+  function getSelectedPresetEntry(): VisualizationPresetEntry | null {
+    return presetEntries.find((entry) => entry.id === visualizationSettings.selectedPresetId) ?? null;
+  }
+
+  function showDialog(dialog: HTMLDialogElement): void {
+    if (typeof dialog.showModal === 'function') {
+      dialog.showModal();
+      return;
+    }
+
+    dialog.setAttribute('open', 'true');
+  }
+
+  function showVisualizationUnavailableDialog(): void {
+    visualizationDialogMessage.textContent = getVisualizationBlockedMessage();
+    showDialog(visualizationDialog);
+  }
+
+  function getVisualizationBlockedMessage(): string {
+    if (!visualizationSupportState.supported) {
+      return visualizationSupportState.message;
+    }
+
+    if (presetCatalogStatus === 'failed') {
+      return presetCatalogError ?? 'Visualization presets could not be loaded.';
+    }
+
+    if (presetCatalogStatus === 'loading') {
+      return 'Visualization presets are still loading.';
+    }
+
+    return 'Visualization is unavailable right now.';
+  }
+
+  async function ensurePresetCatalogLoaded(): Promise<void> {
+    if (presetCatalogStatus === 'ready') {
+      return;
+    }
+
+    if (presetCatalogPromise) {
+      return presetCatalogPromise;
+    }
+
+    presetCatalogStatus = 'loading';
+    presetCatalogError = null;
+    renderVisualizationMenu();
+
+    presetCatalogPromise = loadVisualizationPresetCatalog()
+      .then((catalog) => {
+        presetEntries = catalog.presetEntries;
+        presetCategories = catalog.presetCategories;
+        presetCatalogStatus = 'ready';
+        visualizationSettings = normalizeVisualizationSettings(visualizationSettings, presetEntries);
+        persistVisualizationSettings();
+      })
+      .catch((error: unknown) => {
+        presetCatalogStatus = 'failed';
+        presetCatalogError =
+          error instanceof Error ? error.message : 'Visualization presets could not be loaded.';
+      })
+      .finally(() => {
+        presetCatalogPromise = null;
+        render(currentState);
+      });
+
+    return presetCatalogPromise;
+  }
 
   function createPlaylistItem(file: File): PlaylistItem {
     playlistCounter += 1;
@@ -363,7 +537,13 @@ function mount(): void {
     }
   }
 
-  function setMenu(menu: 'file' | 'view' | 'help' | null): void {
+  function setViewSubmenu(submenu: ViewSubmenu): void {
+    activeViewSubmenu = submenu;
+    presetMenuButton.setAttribute('aria-expanded', String(submenu === 'preset' || submenu?.startsWith('preset-category:')));
+    cycleMenuButton.setAttribute('aria-expanded', String(submenu === 'cycle'));
+  }
+
+  function setMenu(menu: MenuName): void {
     activeMenu = menu;
     fileMenu.hidden = menu !== 'file';
     viewMenu.hidden = menu !== 'view';
@@ -371,6 +551,134 @@ function mount(): void {
     fileMenuButton.setAttribute('aria-expanded', String(menu === 'file'));
     viewMenuButton.setAttribute('aria-expanded', String(menu === 'view'));
     helpMenuButton.setAttribute('aria-expanded', String(menu === 'help'));
+
+    if (menu !== 'view') {
+      setViewSubmenu(null);
+    }
+  }
+
+  function persistVisualizationSettings(): void {
+    writeStoredVisualizationSettings(visualizationSettings);
+  }
+
+  function isVisualizationEnabledForCurrentMedia(state: PlayerState = currentState): boolean {
+    if (!state.file) {
+      return false;
+    }
+
+    return state.isAudioOnly || visualizationSettings.visualizationEnabledForVideo;
+  }
+
+  function isVisualizationPlaying(state: PlayerState = currentState): boolean {
+    return (
+      isVisualizationEnabledForCurrentMedia(state) &&
+      visualizationSupportState.supported &&
+      state.status === 'playing' &&
+      state.playbackPhase === 'playing' &&
+      !state.error
+    );
+  }
+
+  function stopPresetCycleTimer(): void {
+    if (presetCycleTimeoutId !== null) {
+      window.clearTimeout(presetCycleTimeoutId);
+      presetCycleTimeoutId = null;
+    }
+    presetCycleKey = null;
+  }
+
+  function renderPresetMenu(): void {
+    const selectedPreset = getSelectedPresetEntry();
+    const nestedCategoryId = activeViewSubmenu?.startsWith('preset-category:')
+      ? activeViewSubmenu.slice('preset-category:'.length)
+      : null;
+
+    if (presetCatalogStatus === 'loading') {
+      presetMenu.innerHTML = `<div class="menu-action menu-action--static">Loading presets…</div>`;
+      presetMenu.hidden = activeMenu !== 'view' || (activeViewSubmenu !== 'preset' && !activeViewSubmenu?.startsWith('preset-category:'));
+      return;
+    }
+
+    if (presetCatalogStatus === 'failed') {
+      presetMenu.innerHTML = `<div class="menu-action menu-action--static">Failed to load presets</div>`;
+      presetMenu.hidden = activeMenu !== 'view' || (activeViewSubmenu !== 'preset' && !activeViewSubmenu?.startsWith('preset-category:'));
+      return;
+    }
+
+    presetMenu.innerHTML = presetCategories
+      .map((category) => {
+        const submenuVisible = nestedCategoryId === category.id;
+        return `
+          <div class="menu-submenu-wrap menu-submenu-wrap--nested">
+            <button
+              class="menu-action menu-action--submenu"
+              type="button"
+              data-preset-category="${escapeHtml(category.id)}"
+              aria-haspopup="true"
+              aria-expanded="${submenuVisible ? 'true' : 'false'}"
+            >${escapeHtml(category.label)}</button>
+            <div class="menu-dropdown menu-dropdown--submenu menu-dropdown--nested" ${submenuVisible ? '' : 'hidden'}>
+              ${category.presets
+                .map(
+                  (preset) => `
+                    <button
+                      class="menu-action"
+                      type="button"
+                      data-preset-id="${escapeHtml(preset.id)}"
+                    >${escapeHtml(preset.label)}${selectedPreset?.id === preset.id ? ' ✓' : ''}</button>
+                  `,
+                )
+                .join('')}
+            </div>
+          </div>
+        `;
+      })
+      .join('');
+    presetMenu.hidden = activeMenu !== 'view' || (activeViewSubmenu !== 'preset' && !activeViewSubmenu?.startsWith('preset-category:'));
+  }
+
+  function renderCycleMenu(): void {
+    cycleMenu.innerHTML = CYCLE_INTERVAL_OPTIONS.map(
+      (option) => `
+        <button class="menu-action" type="button" data-cycle-interval="${option.value === null ? 'off' : option.value}">
+          ${escapeHtml(option.label)}${visualizationSettings.autoCycleIntervalSec === option.value ? ' ✓' : ''}
+        </button>
+      `,
+    ).join('');
+    cycleMenu.hidden = activeMenu !== 'view' || activeViewSubmenu !== 'cycle';
+  }
+
+  function renderVisualizationMenu(): void {
+    const selectedPreset = getSelectedPresetEntry();
+    const presetActionsDisabled =
+      !visualizationSupportState.supported || presetCatalogStatus === 'loading' || presetCatalogStatus === 'failed';
+
+    visualizationToggleButton.textContent = visualizationSettings.visualizationEnabledForVideo
+      ? 'Visualization for Video ✓'
+      : 'Visualization for Video';
+    presetMenuButton.textContent =
+      presetCatalogStatus === 'loading'
+        ? 'Preset (loading...)'
+        : selectedPreset
+          ? `Preset: ${selectedPreset.label}`
+          : 'Preset';
+    cycleMenuButton.textContent =
+      presetCatalogStatus === 'loading'
+        ? 'Auto Change Preset (loading...)'
+        : `Auto Change Preset: ${intervalLabel(visualizationSettings.autoCycleIntervalSec)}`;
+
+    visualizationToggleButton.classList.toggle('menu-action--disabled', !visualizationSupportState.supported);
+    visualizationToggleButton.setAttribute('aria-disabled', String(!visualizationSupportState.supported));
+    visualizationToggleButton.title = !visualizationSupportState.supported ? getVisualizationBlockedMessage() : '';
+
+    for (const button of [presetMenuButton, cycleMenuButton, nextRandomPresetButton]) {
+      button.classList.toggle('menu-action--disabled', presetActionsDisabled);
+      button.setAttribute('aria-disabled', String(presetActionsDisabled));
+      button.title = presetActionsDisabled ? getVisualizationBlockedMessage() : '';
+    }
+
+    renderPresetMenu();
+    renderCycleMenu();
   }
 
   function renderMediaInfo(state: PlayerState): void {
@@ -404,6 +712,8 @@ function mount(): void {
       ['Probe', state.probeStatus],
       ['Current', formatTime(state.currentTimeSec)],
       ['Total', formatTime(state.durationSec)],
+      ['Visualizer', isVisualizationEnabledForCurrentMedia(state) ? 'Enabled' : 'Off'],
+      ['Preset Cycle', intervalLabel(visualizationSettings.autoCycleIntervalSec)],
     ];
 
     sessionGrid.innerHTML = entries.map(([label, value]) => `<div><dt>${label}</dt><dd>${value}</dd></div>`).join('');
@@ -428,6 +738,7 @@ function mount(): void {
       <div><dt>FFmpeg timing</dt><dd>${ffmpegMs === '-' ? '-' : `${ffmpegMs} ms`}</dd></div>
       <div><dt>Attach timing</dt><dd>${attachMs === '-' ? '-' : `${attachMs} ms`}</dd></div>
       <div><dt>Delivery mode</dt><dd>${state.transcodeSession?.deliveryMode ?? '-'}</dd></div>
+      <div><dt>Visualization</dt><dd>${visualizationSupportState.supported ? 'ready' : visualizationSupportState.reason}</dd></div>
     `;
 
     diagOutput.textContent = state.diagnostics
@@ -488,8 +799,121 @@ function mount(): void {
     renderPlaylist();
   }
 
+  function applySelectedPreset(blendTimeSec: number): void {
+    const selectedPreset = getSelectedPresetEntry();
+    if (!selectedPreset || !visualizationSupportState.supported) {
+      return;
+    }
+
+    if (loadedPresetId === selectedPreset.id) {
+      return;
+    }
+
+    visualizer.loadPreset(selectedPreset.preset, blendTimeSec);
+    loadedPresetId = selectedPreset.id;
+  }
+
+  function syncVisualizationState(state: PlayerState): void {
+    const shouldEnable = isVisualizationEnabledForCurrentMedia(state);
+    const expectedFile = state.file;
+
+    if (!shouldEnable) {
+      visualizationCanvas.hidden = true;
+      mediaElement.classList.remove('media-element--hidden');
+      stopPresetCycleTimer();
+      visualizer.stop();
+      return;
+    }
+
+    void (async () => {
+      await ensurePresetCatalogLoaded();
+      if (currentState.file !== expectedFile || !isVisualizationEnabledForCurrentMedia(currentState)) {
+        return;
+      }
+
+      if (presetCatalogStatus !== 'ready') {
+        visualizationCanvas.hidden = true;
+        mediaElement.classList.remove('media-element--hidden');
+        stopPresetCycleTimer();
+        visualizer.stop();
+        return;
+      }
+
+      visualizationSupportState = await visualizer.attachMediaElement(mediaElement);
+      if (currentState.file !== expectedFile || !isVisualizationEnabledForCurrentMedia(currentState)) {
+        return;
+      }
+
+      if (!visualizationSupportState.supported) {
+        visualizationCanvas.hidden = true;
+        mediaElement.classList.remove('media-element--hidden');
+        stopPresetCycleTimer();
+        visualizer.stop();
+        render(currentState);
+        return;
+      }
+
+      applySelectedPreset(2);
+      visualizer.resize();
+      visualizationCanvas.hidden = false;
+      mediaElement.classList.add('media-element--hidden');
+
+      if (isVisualizationPlaying(currentState)) {
+        visualizer.start();
+      } else {
+        visualizer.stop();
+      }
+
+      renderVisualizationMenu();
+    })();
+  }
+
+  function queuePresetCycleIfNeeded(state: PlayerState): void {
+    if (presetCatalogStatus !== 'ready' || !isVisualizationPlaying(state) || visualizationSettings.autoCycleIntervalSec === null) {
+      stopPresetCycleTimer();
+      return;
+    }
+
+    const nextCycleKey = [
+      state.file?.name ?? 'no-file',
+      visualizationSettings.selectedPresetId ?? 'no-preset',
+      visualizationSettings.autoCycleIntervalSec,
+      state.status,
+      state.playbackPhase,
+    ].join('|');
+
+    if (presetCycleTimeoutId !== null && presetCycleKey === nextCycleKey) {
+      return;
+    }
+
+    stopPresetCycleTimer();
+    presetCycleKey = nextCycleKey;
+    presetCycleTimeoutId = window.setTimeout(() => {
+      const nextPresetId = pickRandomPresetId(
+        presetEntries.map((entry) => entry.id),
+        visualizationSettings.selectedPresetId,
+      );
+
+      if (!nextPresetId) {
+        return;
+      }
+
+      visualizationSettings = {
+        ...visualizationSettings,
+        selectedPresetId: nextPresetId,
+      };
+      persistVisualizationSettings();
+      loadedPresetId = null;
+      presetCycleKey = null;
+      render(currentState);
+    }, visualizationSettings.autoCycleIntervalSec * 1000);
+  }
+
   function render(state: PlayerState): void {
     currentState = state;
+    syncVisualizationState(state);
+    queuePresetCycleIfNeeded(state);
+
     headerFileName.textContent = state.file?.name ?? getCurrentPlaylistItem()?.name ?? 'No file loaded';
     modeSelect.value = state.playbackMode;
     logsOutput.textContent = state.logs.join('\n');
@@ -536,6 +960,43 @@ function mount(): void {
     renderDiagnostics(state);
     renderTimeline(state);
     renderRightPanel();
+    renderVisualizationMenu();
+  }
+
+  function selectPresetById(presetId: string): void {
+    if (presetCatalogStatus !== 'ready') {
+      return;
+    }
+
+    if (!presetEntries.some((entry) => entry.id === presetId)) {
+      return;
+    }
+
+    visualizationSettings = {
+      ...visualizationSettings,
+      selectedPresetId: presetId,
+    };
+    persistVisualizationSettings();
+    loadedPresetId = null;
+    render(currentState);
+  }
+
+  function selectRandomPreset(): void {
+    if (!visualizationSupportState.supported || presetCatalogStatus !== 'ready') {
+      showVisualizationUnavailableDialog();
+      return;
+    }
+
+    const nextPresetId = pickRandomPresetId(
+      presetEntries.map((entry) => entry.id),
+      visualizationSettings.selectedPresetId,
+    );
+    if (!nextPresetId) {
+      return;
+    }
+
+    selectPresetById(nextPresetId);
+    setMenu(null);
   }
 
   async function playPlaylistItem(
@@ -556,6 +1017,7 @@ function mount(): void {
     });
     render(currentState);
     await controller.openFile(item.file);
+    loadedPresetId = null;
     if (autoplay) {
       await controller.play();
     }
@@ -599,8 +1061,7 @@ function mount(): void {
     }
 
     const removingCurrent = playlist[removedIndex]?.status === 'current';
-    const nextPlaylist = playlist.filter((item) => item.id !== itemId);
-    playlist = nextPlaylist;
+    playlist = playlist.filter((item) => item.id !== itemId);
 
     if (!removingCurrent) {
       render(currentState);
@@ -672,6 +1133,9 @@ function mount(): void {
   viewMenuButton.addEventListener('click', (event) => {
     event.stopPropagation();
     setMenu(activeMenu === 'view' ? null : 'view');
+    if (activeMenu === 'view' && visualizationSupportState.supported) {
+      void ensurePresetCatalogLoaded();
+    }
   });
 
   helpMenuButton.addEventListener('click', (event) => {
@@ -711,6 +1175,113 @@ function mount(): void {
     render(currentState);
   });
 
+  visualizationToggleButton.addEventListener('click', () => {
+    if (!visualizationSupportState.supported) {
+      showVisualizationUnavailableDialog();
+      return;
+    }
+
+    visualizationSettings = {
+      ...visualizationSettings,
+      visualizationEnabledForVideo: !visualizationSettings.visualizationEnabledForVideo,
+    };
+    persistVisualizationSettings();
+    if (visualizationSettings.visualizationEnabledForVideo) {
+      void ensurePresetCatalogLoaded();
+    }
+    setMenu(null);
+    render(currentState);
+  });
+
+  presetMenuButton.addEventListener('click', (event) => {
+    event.stopPropagation();
+    if (!visualizationSupportState.supported) {
+      showVisualizationUnavailableDialog();
+      return;
+    }
+
+    if (presetCatalogStatus === 'failed') {
+      showVisualizationUnavailableDialog();
+      return;
+    }
+
+    if (presetCatalogStatus !== 'ready') {
+      void ensurePresetCatalogLoaded();
+    }
+
+    setViewSubmenu(activeViewSubmenu === 'preset' || activeViewSubmenu?.startsWith('preset-category:') ? null : 'preset');
+    renderVisualizationMenu();
+  });
+
+  cycleMenuButton.addEventListener('click', (event) => {
+    event.stopPropagation();
+    if (!visualizationSupportState.supported || presetCatalogStatus !== 'ready') {
+      showVisualizationUnavailableDialog();
+      return;
+    }
+
+    setViewSubmenu(activeViewSubmenu === 'cycle' ? null : 'cycle');
+    renderVisualizationMenu();
+  });
+
+  nextRandomPresetButton.addEventListener('click', (event) => {
+    event.stopPropagation();
+    selectRandomPreset();
+  });
+
+  presetMenu.addEventListener('click', (event) => {
+    event.stopPropagation();
+    if (!visualizationSupportState.supported || presetCatalogStatus !== 'ready') {
+      showVisualizationUnavailableDialog();
+      return;
+    }
+
+    const target = event.target as HTMLElement;
+    const categoryButton = target.closest<HTMLElement>('[data-preset-category]');
+    if (categoryButton) {
+      const categoryId = categoryButton.dataset.presetCategory ?? '';
+      const nextSubmenu = categorySubmenuId(categoryId);
+      setViewSubmenu(activeViewSubmenu === nextSubmenu ? 'preset' : nextSubmenu);
+      renderVisualizationMenu();
+      return;
+    }
+
+    const presetButton = target.closest<HTMLElement>('[data-preset-id]');
+    if (presetButton?.dataset.presetId) {
+      selectPresetById(presetButton.dataset.presetId);
+      setMenu(null);
+    }
+  });
+
+  cycleMenu.addEventListener('click', (event) => {
+    event.stopPropagation();
+    if (!visualizationSupportState.supported || presetCatalogStatus !== 'ready') {
+      showVisualizationUnavailableDialog();
+      return;
+    }
+
+    const button = (event.target as HTMLElement).closest<HTMLElement>('[data-cycle-interval]');
+    if (!button) {
+      return;
+    }
+
+    const rawValue = button.dataset.cycleInterval ?? 'off';
+    const nextInterval =
+      rawValue === 'off'
+        ? null
+        : rawValue === '30' || rawValue === '60' || rawValue === '120' || rawValue === '300'
+          ? Number(rawValue)
+          : visualizationSettings.autoCycleIntervalSec;
+
+    visualizationSettings = {
+      ...visualizationSettings,
+      autoCycleIntervalSec: nextInterval as PresetCycleIntervalSec,
+    };
+    persistVisualizationSettings();
+    setMenu(null);
+    render(currentState);
+  });
+
   playlistTabButton.addEventListener('click', () => {
     rightPanelTab = 'playlist';
     render(currentState);
@@ -723,7 +1294,7 @@ function mount(): void {
 
   aboutButton.addEventListener('click', () => {
     setMenu(null);
-    aboutDialog.showModal();
+    showDialog(aboutDialog);
   });
 
   openFileInput.addEventListener('change', async () => {
@@ -845,6 +1416,19 @@ function mount(): void {
     controller.pause();
   });
 
+  visualizationCanvas.addEventListener('click', async () => {
+    if (!currentState.file) {
+      return;
+    }
+
+    if (mediaElement.paused) {
+      await controller.play();
+      return;
+    }
+
+    controller.pause();
+  });
+
   mediaElement.addEventListener('ended', async () => {
     if (autoAdvanceInProgress) {
       return;
@@ -888,7 +1472,9 @@ function mount(): void {
     draggedPlaylistItemId = target.dataset.playlistId ?? null;
     target.classList.add('playlist-item--dragging');
     event.dataTransfer?.setData('text/plain', draggedPlaylistItemId ?? '');
-    event.dataTransfer!.effectAllowed = 'move';
+    if (event.dataTransfer) {
+      event.dataTransfer.effectAllowed = 'move';
+    }
   });
 
   playlistList.addEventListener('dragend', () => {
@@ -903,7 +1489,9 @@ function mount(): void {
       return;
     }
     event.preventDefault();
-    event.dataTransfer!.dropEffect = 'move';
+    if (event.dataTransfer) {
+      event.dataTransfer.dropEffect = 'move';
+    }
   });
 
   playlistList.addEventListener('drop', (event) => {
@@ -919,7 +1507,15 @@ function mount(): void {
     render(currentState);
   });
 
+  window.addEventListener('resize', () => {
+    if (!visualizationCanvas.hidden && visualizationSupportState.supported) {
+      visualizer.resize();
+    }
+  });
+
   window.addEventListener('beforeunload', () => {
+    stopPresetCycleTimer();
+    visualizer.dispose();
     controller.dispose();
   });
 

@@ -3,6 +3,12 @@ export type ResolvedEngine = 'browser' | 'ffmpeg';
 export type ProbeStatus = 'idle' | 'running' | 'completed' | 'failed';
 export type PlaylistItemStatus = 'pending' | 'played' | 'current';
 export type RightPanelTab = 'playlist' | 'debug';
+export type PresetCycleIntervalSec = 30 | 60 | 120 | 300 | null;
+export type VisualizationUnavailableReason =
+  | 'supported'
+  | 'webgl2_unavailable'
+  | 'butterchurn_init_failed'
+  | 'audio_graph_failed';
 export type PlaybackPhase =
   | 'idle'
   | 'probing'
@@ -75,6 +81,18 @@ export interface DiagnosticTimings {
 
 export interface PlaybackErrorInfo {
   code: PlaybackErrorCode;
+  message: string;
+}
+
+export interface VisualizationSettings {
+  visualizationEnabledForVideo: boolean;
+  selectedPresetId: string | null;
+  autoCycleIntervalSec: PresetCycleIntervalSec;
+}
+
+export interface VisualizationSupportState {
+  supported: boolean;
+  reason: VisualizationUnavailableReason;
   message: string;
 }
 

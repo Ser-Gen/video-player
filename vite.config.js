@@ -5,7 +5,7 @@ export default defineConfig({
         rollupOptions: {
             output: {
                 entryFileNames: 'assets/[name].js',
-                chunkFileNames: 'assets/[name].js',
+                chunkFileNames: (chunk) => `assets/${chunk.name.replace(/^_+/, '')}.js`,
                 assetFileNames: 'assets/[name][extname]',
             },
         },
@@ -14,7 +14,7 @@ export default defineConfig({
         rollupOptions: {
             output: {
                 entryFileNames: 'assets/[name].js',
-                chunkFileNames: 'assets/[name].js',
+                chunkFileNames: (chunk) => `assets/${chunk.name.replace(/^_+/, '')}.js`,
                 assetFileNames: 'assets/[name][extname]',
             },
         },

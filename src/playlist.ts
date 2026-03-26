@@ -1,8 +1,8 @@
 import type { PlaylistItemStatus } from './types';
 
-export interface PlaylistItem<TFile = File> {
+export interface PlaylistItem<TSource = unknown> {
   id: string;
-  file: TFile;
+  source: TSource;
   name: string;
   status: PlaylistItemStatus;
 }

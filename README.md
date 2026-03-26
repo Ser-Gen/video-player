@@ -1,13 +1,16 @@
 # Browser Media Player with FFmpeg WASM Fallback
 
-Local-first browser player that prefers native playback when the browser supports the file and falls back to `ffmpeg.wasm` when it does not, or when the user forces FFmpeg mode.
+Browser media player that supports local files, direct remote URLs, and HLS playlists. It prefers native playback when the browser supports the source and falls back to `ffmpeg.wasm` for unsupported local files, or when the user forces FFmpeg mode for local playback.
 
 ## Features
 
-- Local file input only for v1
+- Local file playback
+- Direct remote URL playback for browser-supported formats
+- `m3u` / `m3u8` playlist import from local files or remote URLs
+- HLS playback via native browser support or `hls.js`
 - `Auto / Browser / FFmpeg` playback mode switch
 - Native playback when `canPlayType()` reports support
-- FFmpeg fallback for unsupported formats
+- FFmpeg fallback for unsupported local formats
 - Seek support in both modes
 - Structured media info extracted from FFmpeg logs
 - Raw FFmpeg log viewer
@@ -42,6 +45,8 @@ npm test
 ## Notes and limitations
 
 - FFmpeg core files are loaded from the jsDelivr CDN at runtime.
-- v1 is designed for local files only, not remote URLs.
-- FFmpeg mode is heavier than native playback and seek is not instant for unsupported formats.
+- FFmpeg mode is available only for local files in this version.
+- Remote non-HLS URLs depend on browser codec support and server CORS/range behavior.
+- HLS playback uses native browser support when available and falls back to `hls.js` elsewhere.
+- FFmpeg mode is heavier than native playback and seek is not instant for unsupported local formats.
 - Browser codec/container detection is intentionally conservative and based on MIME + `canPlayType()`.

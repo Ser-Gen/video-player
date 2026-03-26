@@ -2,9 +2,9 @@ import { getAdjacentIndexAfterRemoval, markPlaylistItemPlayed, movePlaylistItem,
 
 function createItems(): PlaylistItem<string>[] {
   return [
-    { id: 'a', file: 'a', name: 'a.mp4', status: 'current' },
-    { id: 'b', file: 'b', name: 'b.mp4', status: 'pending' },
-    { id: 'c', file: 'c', name: 'c.mp4', status: 'pending' },
+    { id: 'a', source: 'a', name: 'a.mp4', status: 'current' },
+    { id: 'b', source: 'b', name: 'b.mp4', status: 'pending' },
+    { id: 'c', source: 'c', name: 'c.mp4', status: 'pending' },
   ];
 }
 

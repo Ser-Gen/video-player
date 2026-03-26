@@ -1,8 +1,11 @@
 import { detectCapability } from './capability';
 import { FFmpegService } from './ffmpegService';
+import { defaultHlsClientFactory, HLS_ERROR_EVENT, HLS_MEDIA_ATTACHED_EVENT, type HlsClient, type HlsClientFactory } from './hlsPlayback';
+import { createLocalFileSource, getSourceName, isLocalFileSource } from './sourceUtils';
 import type {
   DiagnosticTimings,
   MediaInfo,
+  MediaSourceItem,
   PlaybackDiagnosticEvent,
   PlaybackErrorCode,
   PlaybackMode,
@@ -41,7 +44,7 @@ function emptyTimings(): DiagnosticTimings {
 
 function createInitialState(): PlayerState {
   return {
-    file: null,
+    source: null,
     playbackMode: 'auto',
     resolvedEngine: null,
     status: 'idle',
@@ -68,8 +71,10 @@ export class BrowserMediaPlayerController implements PlayerController {
   private listeners = new Set<(state: PlayerState) => void>();
   private probeElement: HTMLMediaElement;
   private ffmpegService: FFmpegAdapter;
+  private hlsFactory: HlsClientFactory;
   private objectUrl: string | null = null;
   private mediaSource: MediaSource | null = null;
+  private hlsClient: HlsClient | null = null;
   private transcodeToken = 0;
   private probeToken = 0;
   private pendingFfmpegSeek: number | null = null;
@@ -81,11 +86,13 @@ export class BrowserMediaPlayerController implements PlayerController {
     public readonly mediaElement: HTMLMediaElement,
     options?: {
       ffmpegService?: FFmpegAdapter;
+      hlsFactory?: HlsClientFactory;
       probeElement?: HTMLMediaElement;
     },
   ) {
     this.probeElement = options?.probeElement ?? document.createElement('video');
     this.ffmpegService = options?.ffmpegService ?? new FFmpegService();
+    this.hlsFactory = options?.hlsFactory ?? defaultHlsClientFactory;
     this.ffmpegService.onLog((message) => {
       this.setState((prev) => ({ ...prev, logs: [...prev.logs, message] }));
     });
@@ -102,41 +109,81 @@ export class BrowserMediaPlayerController implements PlayerController {
   }
 
   async openFile(file: File): Promise<void> {
+    await this.openSource(createLocalFileSource(file));
+  }
+
+  async openSource(source: MediaSourceItem): Promise<void> {
     this.revokeObjectUrl();
+    this.destroyHlsClient();
     this.shouldAutoplayWhenReady = false;
     const requestProbeId = ++this.probeToken;
-    const capability = detectCapability(file, this.probeElement);
-    this.pauseMediaElement('openFile:reset-before-load');
+    const capability = detectCapability(source, this.probeElement);
+    this.pauseMediaElement('openSource:reset-before-load');
     this.mediaElement.removeAttribute('src');
     this.mediaElement.load();
-    const resolvedEngine = resolvePlaybackEngine(this.state.playbackMode, capability.browserSupported);
+    const resolvedEngine = this.resolveEngineForSource(source, capability.browserSupported);
 
     this.setState(() => ({
       ...createInitialState(),
-      file,
+      source,
       playbackMode: this.state.playbackMode,
       resolvedEngine,
       browserSupported: capability.browserSupported,
-      status: resolvedEngine === 'browser' ? 'paused' : 'probing',
-      playbackPhase: resolvedEngine === 'browser' ? 'ready' : 'probing',
+      status:
+        resolvedEngine === 'browser'
+          ? capability.browserSupported || source.kind === 'hls-playlist'
+            ? 'paused'
+            : 'error'
+          : 'probing',
+      playbackPhase:
+        resolvedEngine === 'browser'
+          ? capability.browserSupported || source.kind === 'hls-playlist'
+            ? 'ready'
+            : 'failed'
+          : 'probing',
       isAudioOnly: capability.isAudioOnly,
-      probeStatus: 'running',
-      activeProbeRequestId: requestProbeId,
+      probeStatus: isLocalFileSource(source) ? 'running' : 'idle',
+      activeProbeRequestId: isLocalFileSource(source) ? requestProbeId : null,
     }));
-    this.pushDiagnostic('session', 'Opened media file', file.name);
+    this.pushDiagnostic('session', 'Opened media source', getSourceName(source));
     this.pushDiagnostic(
       'capability',
       'Browser support detection complete',
-      `browserSupported=${capability.browserSupported}; audioOnly=${capability.isAudioOnly}`,
+      `browserSupported=${capability.browserSupported}; audioOnly=${capability.isAudioOnly}; kind=${source.kind}`,
     );
 
-    if (resolvedEngine === 'browser') {
-      this.loadBrowserSource(file, 0);
-      void this.runBackgroundProbe(file, requestProbeId);
+    if (!isLocalFileSource(source) && source.kind !== 'hls-playlist' && !capability.browserSupported) {
+      this.applyPlaybackError(
+        'remote_unsupported',
+        'This remote URL is not supported by the browser. Remote FFmpeg fallback is not available in this version.',
+      );
       return;
     }
 
-    const probeSucceeded = await this.runBlockingProbe(file, requestProbeId);
+    if (source.kind === 'hls-playlist') {
+      try {
+        await this.loadHlsSource(source, 0);
+      } catch (error) {
+        const message = error instanceof Error ? error.message : 'Failed to attach HLS playback';
+        this.applyPlaybackError('hls_attach_failed', message);
+      }
+      return;
+    }
+
+    if (resolvedEngine === 'browser') {
+      this.loadBrowserSource(source, 0);
+      if (isLocalFileSource(source)) {
+        void this.runBackgroundProbe(source, requestProbeId);
+      }
+      return;
+    }
+
+    if (!isLocalFileSource(source)) {
+      this.applyPlaybackError('remote_unsupported', 'FFmpeg mode is only available for local files.');
+      return;
+    }
+
+    const probeSucceeded = await this.runBlockingProbe(source, requestProbeId);
     if (!probeSucceeded) {
       return;
     }
@@ -161,7 +208,7 @@ export class BrowserMediaPlayerController implements PlayerController {
   }
 
   async play(): Promise<void> {
-    if (!this.state.file) {
+    if (!this.state.source) {
       return;
     }
 
@@ -248,7 +295,7 @@ export class BrowserMediaPlayerController implements PlayerController {
   }
 
   async seek(timeSec: number): Promise<void> {
-    if (!this.state.file) {
+    if (!this.state.source) {
       return;
     }
 
@@ -285,15 +332,16 @@ export class BrowserMediaPlayerController implements PlayerController {
 
     this.disposed = true;
     this.unbindMediaElementDiagnostics();
+    this.destroyHlsClient();
     this.revokeObjectUrl();
   }
 
   private async applyCurrentMode(timeSec: number, autoplay: boolean): Promise<void> {
-    if (!this.state.file) {
+    if (!this.state.source) {
       return;
     }
 
-    const resolvedEngine = resolvePlaybackEngine(this.state.playbackMode, this.state.browserSupported);
+    const resolvedEngine = this.resolveEngineForSource(this.state.source, this.state.browserSupported ?? false);
 
     this.setState((prev) => ({
       ...prev,
@@ -301,7 +349,17 @@ export class BrowserMediaPlayerController implements PlayerController {
     }));
 
     if (resolvedEngine === 'browser') {
-      this.loadBrowserSource(this.state.file, timeSec);
+      if (this.state.source.kind === 'hls-playlist') {
+        await this.loadHlsSource(this.state.source, timeSec);
+      } else if (this.state.browserSupported) {
+        this.loadBrowserSource(this.state.source, timeSec);
+      } else {
+        this.applyPlaybackError(
+          'remote_unsupported',
+          'This remote URL is not supported by the browser. Remote FFmpeg fallback is not available in this version.',
+        );
+        return;
+      }
       if (autoplay) {
         await this.play();
       }
@@ -312,8 +370,8 @@ export class BrowserMediaPlayerController implements PlayerController {
   }
 
   private async startFfmpegSeek(timeSec: number, autoplay: boolean): Promise<void> {
-    const file = this.state.file;
-    if (!file) {
+    const source = this.state.source;
+    if (!source || !isLocalFileSource(source)) {
       return;
     }
 
@@ -353,7 +411,7 @@ export class BrowserMediaPlayerController implements PlayerController {
     this.pushDiagnostic('ffmpeg.transcode', 'Starting full-segment transcode', `${timeSec}s`);
 
     try {
-      const result = await this.ffmpegService.transcodeFrom(file, timeSec, this.state.isAudioOnly);
+      const result = await this.ffmpegService.transcodeFrom(source.file, timeSec, this.state.isAudioOnly);
       if (requestId !== this.transcodeToken) {
         return;
       }
@@ -432,14 +490,21 @@ export class BrowserMediaPlayerController implements PlayerController {
     }
   }
 
-  private loadBrowserSource(file: File, timeSec: number): void {
+  private loadBrowserSource(source: MediaSourceItem, timeSec: number): void {
     this.pauseMediaElement('loadBrowserSource:swap-source');
+    this.destroyHlsClient();
     this.revokeObjectUrl();
-    this.objectUrl = URL.createObjectURL(file);
-    this.mediaElement.src = this.objectUrl;
+
+    if (isLocalFileSource(source)) {
+      this.objectUrl = URL.createObjectURL(source.file);
+      this.mediaElement.src = this.objectUrl;
+    } else {
+      this.mediaElement.src = source.url;
+    }
+
     this.mediaElement.load();
     this.mediaElement.currentTime = timeSec;
-    this.pushDiagnostic('attach.browser', 'Browser source attached', file.name);
+    this.pushDiagnostic('attach.browser', 'Browser source attached', getSourceName(source));
 
     this.setState((prev) => ({
       ...prev,
@@ -449,7 +514,58 @@ export class BrowserMediaPlayerController implements PlayerController {
     }));
   }
 
-  private async runBlockingProbe(file: File, requestId: number): Promise<boolean> {
+  private async loadHlsSource(source: Extract<MediaSourceItem, { kind: 'hls-playlist' }>, timeSec: number): Promise<void> {
+    this.pauseMediaElement('loadHlsSource:swap-source');
+    this.destroyHlsClient();
+    this.revokeObjectUrl();
+
+    const canPlayNatively = this.probeElement.canPlayType('application/vnd.apple.mpegurl');
+    if (canPlayNatively === 'probably' || canPlayNatively === 'maybe') {
+      this.mediaElement.src = source.url;
+      this.mediaElement.load();
+      this.mediaElement.currentTime = timeSec;
+      this.pushDiagnostic('attach.hls.native', 'Native HLS source attached', source.url);
+      this.setState((prev) => ({
+        ...prev,
+        browserSupported: true,
+        status: 'paused',
+        playbackPhase: 'ready',
+        error: null,
+      }));
+      return;
+    }
+
+    if (!this.hlsFactory.isSupported()) {
+      throw new Error('HLS playback is not supported in this browser.');
+    }
+
+    const hlsClient = this.hlsFactory.create();
+    this.hlsClient = hlsClient;
+    hlsClient.on(HLS_ERROR_EVENT, (_, data) => {
+      const detail =
+        typeof data === 'object' && data !== null && 'details' in data && typeof data.details === 'string'
+          ? data.details
+          : 'Unknown HLS error';
+      this.applyPlaybackError('hls_attach_failed', `HLS playback failed: ${detail}`);
+    });
+
+    await new Promise<void>((resolve) => {
+      hlsClient.on(HLS_MEDIA_ATTACHED_EVENT, () => resolve());
+      hlsClient.attachMedia(this.mediaElement);
+    });
+
+    hlsClient.loadSource(source.url);
+    this.pushDiagnostic('attach.hls', 'HLS.js source attached', source.url);
+    this.setState((prev) => ({
+      ...prev,
+      browserSupported: true,
+      status: 'paused',
+      playbackPhase: 'ready',
+      error: null,
+    }));
+  }
+
+  private async runBlockingProbe(source: Extract<MediaSourceItem, { kind: 'local-file' }>, requestId: number): Promise<boolean> {
     const probeStartedAt = Date.now();
     this.setState((prev) => ({
       ...prev,
@@ -464,7 +580,7 @@ export class BrowserMediaPlayerController implements PlayerController {
     this.pushDiagnostic('ffmpeg.probe', 'Starting FFmpeg probe');
 
     try {
-      const mediaInfo = await this.ffmpegService.probe(file);
+      const mediaInfo = await this.ffmpegService.probe(source.file);
       if (requestId !== this.probeToken) {
         return false;
       }
@@ -500,7 +616,7 @@ export class BrowserMediaPlayerController implements PlayerController {
     }
   }
 
-  private async runBackgroundProbe(file: File, requestId: number): Promise<void> {
+  private async runBackgroundProbe(source: Extract<MediaSourceItem, { kind: 'local-file' }>, requestId: number): Promise<void> {
     const probeStartedAt = Date.now();
     this.setState((prev) => ({
       ...prev,
@@ -515,8 +631,8 @@ export class BrowserMediaPlayerController implements PlayerController {
     this.pushDiagnostic('ffmpeg.probe.background', 'Starting background FFmpeg probe');
 
     try {
-      const mediaInfo = await this.ffmpegService.probe(file);
-      if (requestId !== this.probeToken || this.state.file !== file) {
+      const mediaInfo = await this.ffmpegService.probe(source.file);
+      if (requestId !== this.probeToken || this.state.source !== source) {
         return;
       }
 
@@ -539,7 +655,7 @@ export class BrowserMediaPlayerController implements PlayerController {
         },
       }));
     } catch (error) {
-      if (requestId !== this.probeToken || this.state.file !== file) {
+      if (requestId !== this.probeToken || this.state.source !== source) {
         return;
       }
       const message = error instanceof Error ? error.message : 'Background FFmpeg probe failed';
@@ -602,6 +718,9 @@ export class BrowserMediaPlayerController implements PlayerController {
 
   private classifyPlaybackError(message: string): PlaybackErrorCode {
     const normalized = message.toLowerCase();
+    if (normalized.includes('hls')) {
+      return 'hls_attach_failed';
+    }
     if (normalized.includes('type unsupported') || normalized.includes('codec')) {
       return 'codec_unsupported';
     }
@@ -615,6 +734,23 @@ export class BrowserMediaPlayerController implements PlayerController {
       return 'play_rejected';
     }
     return 'transcode_slow';
+  }
+
+  private resolveEngineForSource(source: MediaSourceItem, browserSupported: boolean): ResolvedEngine {
+    if (!isLocalFileSource(source)) {
+      return 'browser';
+    }
+
+    return resolvePlaybackEngine(this.state.playbackMode, browserSupported);
+  }
+
+  private destroyHlsClient(): void {
+    if (!this.hlsClient) {
+      return;
+    }
+
+    this.hlsClient.destroy();
+    this.hlsClient = null;
   }
 
   private revokeObjectUrl(): void {
@@ -634,6 +770,7 @@ export class BrowserMediaPlayerController implements PlayerController {
 
   private clearAttachedSource(reason: string): void {
     this.pushDiagnostic('attach.clear', 'Clearing current media source', reason);
+    this.destroyHlsClient();
     this.revokeObjectUrl();
     this.mediaElement.removeAttribute('src');
     this.mediaElement.load();

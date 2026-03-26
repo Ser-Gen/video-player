@@ -1,4 +1,5 @@
 import { detectCapability, inferMimeType } from './capability';
+import { createHlsPlaylistSource, createRemoteUrlSource } from './sourceUtils';
 
 describe('capability detection', () => {
   it('infers mime type from extension when file type is empty', () => {
@@ -16,5 +17,20 @@ describe('capability detection', () => {
       browserSupported: true,
       isAudioOnly: true,
     });
+  });
+
+  it('detects HLS playlist mime type from source kind', () => {
+    const element = document.createElement('video');
+    vi.spyOn(element, 'canPlayType').mockReturnValue('');
+
+    expect(detectCapability(createHlsPlaylistSource('https://example.com/live.m3u8'), element)).toEqual({
+      mimeType: 'application/vnd.apple.mpegurl',
+      browserSupported: false,
+      isAudioOnly: false,
+    });
+  });
+
+  it('infers remote url mime type from extension', () => {
+    expect(inferMimeType(createRemoteUrlSource('https://example.com/track.mp3'))).toBe('audio/mpeg');
   });
 });

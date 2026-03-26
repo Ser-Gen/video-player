@@ -1,7 +1,10 @@
 import './styles.css';
 import { BrowserMediaPlayerController } from './mediaController';
 import { getAdjacentIndexAfterRemoval, markPlaylistItemPlayed, movePlaylistItem, setCurrentPlaylistItem, type PlaylistItem } from './playlist';
+import { parseM3uPlaylist } from './m3u';
+import { createHlsPlaylistSource, createLocalFileSource, createRemoteUrlSource, getSourceName } from './sourceUtils';
 import type {
+  MediaSourceItem,
   PlaybackMode,
   PlayerState,
   PresetCycleIntervalSec,
@@ -148,6 +151,19 @@ function categorySubmenuId(categoryId: string): ViewSubmenu {
   return `preset-category:${categoryId}`;
 }
 
+function normalizeUrlInput(value: string): string | null {
+  const trimmed = value.trim();
+  if (!trimmed) {
+    return null;
+  }
+
+  try {
+    return new URL(trimmed).toString();
+  } catch {
+    return null;
+  }
+}
+
 function mount(): void {
   const app = document.querySelector<HTMLDivElement>('#app');
   if (!app) {
@@ -158,6 +174,7 @@ function mount(): void {
     <main class="app-shell">
       <input id="open-file-input" class="hidden-file-input" type="file" accept="audio/*,video/*,.mkv,.avi,.mov,.flac,.ts,.m2ts,.ogg,.opus" />
       <input id="playlist-file-input" class="hidden-file-input" type="file" accept="audio/*,video/*,.mkv,.avi,.mov,.flac,.ts,.m2ts,.ogg,.opus" multiple />
+      <input id="playlist-import-input" class="hidden-file-input" type="file" accept=".m3u,.m3u8,audio/x-mpegurl,application/vnd.apple.mpegurl,text/plain" />
 
       <header class="menu-bar">
         <div class="menu-group">
@@ -165,7 +182,10 @@ function mount(): void {
             <button id="file-menu-button" class="menu-trigger" type="button" aria-haspopup="true" aria-expanded="false">File</button>
             <div id="file-menu" class="menu-dropdown" hidden>
               <button id="open-file-button" class="menu-action" type="button">Open File</button>
+              <button id="open-url-button" class="menu-action" type="button">Open URL</button>
               <button id="add-files-button" class="menu-action" type="button">Add Files to Playlist</button>
+              <button id="import-playlist-url-button" class="menu-action" type="button">Import Playlist URL</button>
+              <button id="import-playlist-file-button" class="menu-action" type="button">Import Playlist File</button>
             </div>
           </div>
           <div class="menu-item-wrap">
@@ -193,7 +213,7 @@ function mount(): void {
           </div>
         </div>
         <div class="menu-status">
-          <span id="header-file-name">No file loaded</span>
+          <span id="header-file-name">No source loaded</span>
         </div>
       </header>
 
@@ -314,8 +334,8 @@ function mount(): void {
       <dialog id="about-dialog" class="about-dialog">
         <form method="dialog" class="about-dialog-form">
           <h2>About</h2>
-          <p>This application plays local media in the browser with native playback when possible.</p>
-          <p>When the browser cannot decode a format directly, it can fall back to FFmpeg WASM and transcode the media into a playable stream.</p>
+          <p>This application plays local files, direct media URLs, and HLS playlists in the browser.</p>
+          <p>When a local file is not browser-playable, it can fall back to FFmpeg WASM and transcode the media into a playable stream.</p>
           <button class="control-button accent" type="submit">Close</button>
         </form>
       </dialog>
@@ -327,11 +347,28 @@ function mount(): void {
           <button class="control-button accent" type="submit">Close</button>
         </form>
       </dialog>
+
+      <dialog id="url-dialog" class="about-dialog">
+        <form id="url-dialog-form" class="about-dialog-form">
+          <h2 id="url-dialog-title">Open URL</h2>
+          <p id="url-dialog-description">Enter a direct media URL.</p>
+          <label class="stack-field">
+            <span class="stack-label">URL</span>
+            <input id="url-dialog-input" class="dialog-input" type="url" placeholder="https://example.com/media.mp4" />
+          </label>
+          <p id="url-dialog-error" class="error-box" hidden></p>
+          <div class="dialog-actions">
+            <button id="url-dialog-cancel" class="control-button" type="button">Cancel</button>
+            <button id="url-dialog-submit" class="control-button accent" type="submit">Open</button>
+          </div>
+        </form>
+      </dialog>
     </main>
   `;
 
   const openFileInput = requireElement(app.querySelector<HTMLInputElement>('#open-file-input'), 'Open file input not found');
   const playlistFileInput = requireElement(app.querySelector<HTMLInputElement>('#playlist-file-input'), 'Playlist file input not found');
+  const playlistImportInput = requireElement(app.querySelector<HTMLInputElement>('#playlist-import-input'), 'Playlist import input not found');
   const mediaElement = requireElement(app.querySelector<HTMLVideoElement>('#media-element'), 'Media element not found');
   const visualizationCanvas = requireElement(app.querySelector<HTMLCanvasElement>('#visualization-canvas'), 'Visualization canvas not found');
   const viewerCenterOverlay = requireElement(app.querySelector<HTMLDivElement>('#viewer-center-overlay'), 'Viewer center overlay not found');
@@ -345,7 +382,16 @@ function mount(): void {
   const viewMenu = requireElement(app.querySelector<HTMLDivElement>('#view-menu'), 'View menu not found');
   const helpMenu = requireElement(app.querySelector<HTMLDivElement>('#help-menu'), 'Help menu not found');
   const openFileButton = requireElement(app.querySelector<HTMLButtonElement>('#open-file-button'), 'Open file button not found');
+  const openUrlButton = requireElement(app.querySelector<HTMLButtonElement>('#open-url-button'), 'Open URL button not found');
   const addFilesButton = requireElement(app.querySelector<HTMLButtonElement>('#add-files-button'), 'Add files button not found');
+  const importPlaylistUrlButton = requireElement(
+    app.querySelector<HTMLButtonElement>('#import-playlist-url-button'),
+    'Import playlist URL button not found',
+  );
+  const importPlaylistFileButton = requireElement(
+    app.querySelector<HTMLButtonElement>('#import-playlist-file-button'),
+    'Import playlist file button not found',
+  );
   const playlistToggleButton = requireElement(app.querySelector<HTMLButtonElement>('#playlist-toggle-button'), 'Playlist toggle button not found');
   const debugToggleButton = requireElement(app.querySelector<HTMLButtonElement>('#debug-toggle-button'), 'Debug toggle button not found');
   const visualizationToggleButton = requireElement(
@@ -370,6 +416,17 @@ function mount(): void {
     app.querySelector<HTMLElement>('#visualization-dialog-message'),
     'Visualization dialog message not found',
   );
+  const urlDialog = requireElement(app.querySelector<HTMLDialogElement>('#url-dialog'), 'URL dialog not found');
+  const urlDialogForm = requireElement(app.querySelector<HTMLFormElement>('#url-dialog-form'), 'URL dialog form not found');
+  const urlDialogTitle = requireElement(app.querySelector<HTMLElement>('#url-dialog-title'), 'URL dialog title not found');
+  const urlDialogDescription = requireElement(
+    app.querySelector<HTMLElement>('#url-dialog-description'),
+    'URL dialog description not found',
+  );
+  const urlDialogInput = requireElement(app.querySelector<HTMLInputElement>('#url-dialog-input'), 'URL dialog input not found');
+  const urlDialogError = requireElement(app.querySelector<HTMLElement>('#url-dialog-error'), 'URL dialog error not found');
+  const urlDialogCancel = requireElement(app.querySelector<HTMLButtonElement>('#url-dialog-cancel'), 'URL dialog cancel not found');
+  const urlDialogSubmit = requireElement(app.querySelector<HTMLButtonElement>('#url-dialog-submit'), 'URL dialog submit not found');
   const previousButton = requireElement(app.querySelector<HTMLButtonElement>('#previous-button'), 'Previous button not found');
   const playToggleButton = requireElement(app.querySelector<HTMLButtonElement>('#play-toggle-button'), 'Play toggle button not found');
   const playToggleIcon = requireElement(app.querySelector<HTMLElement>('#play-toggle-icon'), 'Play toggle icon not found');
@@ -384,7 +441,7 @@ function mount(): void {
   const timelineHoverMarker = requireElement(app.querySelector<HTMLDivElement>('#timeline-hover-marker'), 'Timeline hover marker not found');
   const timelineTooltip = requireElement(app.querySelector<HTMLDivElement>('#timeline-tooltip'), 'Timeline tooltip not found');
   const transportTime = requireElement(app.querySelector<HTMLElement>('#transport-time'), 'Transport time not found');
-  const headerFileName = requireElement(app.querySelector<HTMLElement>('#header-file-name'), 'Header file name not found');
+  const headerFileName = requireElement(app.querySelector<HTMLElement>('#header-file-name'), 'Header source name not found');
   const sidebar = requireElement(app.querySelector<HTMLElement>('#sidebar'), 'Sidebar not found');
   const rightPanelTabs = requireElement(app.querySelector<HTMLElement>('#right-panel-tabs'), 'Right panel tabs not found');
   const playlistTabButton = requireElement(app.querySelector<HTMLButtonElement>('#playlist-tab-button'), 'Playlist tab button not found');
@@ -421,13 +478,14 @@ function mount(): void {
   let rightPanelTab: RightPanelTab = 'playlist';
   let playlistVisible = false;
   let debugVisible = false;
-  let playlist: PlaylistItem[] = [];
+  let playlist: PlaylistItem<MediaSourceItem>[] = [];
   let playlistCounter = 0;
   let draggedPlaylistItemId: string | null = null;
   let autoAdvanceInProgress = false;
   let presetCycleTimeoutId: number | null = null;
   let presetCycleKey: string | null = null;
   let loadedPresetId: string | null = null;
+  let urlDialogMode: 'open-url' | 'import-playlist-url' = 'open-url';
 
   mediaElement.volume = storedVolumeSettings?.volume ?? 1;
   mediaElement.muted = storedVolumeSettings?.muted ?? false;
@@ -503,17 +561,17 @@ function mount(): void {
     return presetCatalogPromise;
   }
 
-  function createPlaylistItem(file: File): PlaylistItem {
+  function createPlaylistItem(source: MediaSourceItem): PlaylistItem<MediaSourceItem> {
     playlistCounter += 1;
     return {
       id: `playlist-${playlistCounter}`,
-      file,
-      name: file.name,
+      source,
+      name: getSourceName(source),
       status: 'pending',
     };
   }
 
-  function getCurrentPlaylistItem(): PlaylistItem | null {
+  function getCurrentPlaylistItem(): PlaylistItem<MediaSourceItem> | null {
     return playlist.find((item) => item.status === 'current') ?? null;
   }
 
@@ -562,7 +620,7 @@ function mount(): void {
   }
 
   function isVisualizationEnabledForCurrentMedia(state: PlayerState = currentState): boolean {
-    if (!state.file) {
+    if (!state.source) {
       return false;
     }
 
@@ -705,7 +763,8 @@ function mount(): void {
 
   function renderSession(state: PlayerState): void {
     const entries = [
-      ['File', state.file?.name ?? '-'],
+      ['Source', state.source?.name ?? '-'],
+      ['Kind', state.source?.kind ?? '-'],
       ['Engine', state.resolvedEngine ?? '-'],
       ['Status', state.status],
       ['Phase', state.playbackPhase],
@@ -815,7 +874,7 @@ function mount(): void {
 
   function syncVisualizationState(state: PlayerState): void {
     const shouldEnable = isVisualizationEnabledForCurrentMedia(state);
-    const expectedFile = state.file;
+    const expectedSource = state.source;
 
     if (!shouldEnable) {
       visualizationCanvas.hidden = true;
@@ -827,7 +886,7 @@ function mount(): void {
 
     void (async () => {
       await ensurePresetCatalogLoaded();
-      if (currentState.file !== expectedFile || !isVisualizationEnabledForCurrentMedia(currentState)) {
+      if (currentState.source !== expectedSource || !isVisualizationEnabledForCurrentMedia(currentState)) {
         return;
       }
 
@@ -840,7 +899,7 @@ function mount(): void {
       }
 
       visualizationSupportState = await visualizer.attachMediaElement(mediaElement);
-      if (currentState.file !== expectedFile || !isVisualizationEnabledForCurrentMedia(currentState)) {
+      if (currentState.source !== expectedSource || !isVisualizationEnabledForCurrentMedia(currentState)) {
         return;
       }
 
@@ -875,7 +934,7 @@ function mount(): void {
     }
 
     const nextCycleKey = [
-      state.file?.name ?? 'no-file',
+      state.source?.name ?? 'no-source',
       visualizationSettings.selectedPresetId ?? 'no-preset',
       visualizationSettings.autoCycleIntervalSec,
       state.status,
@@ -914,7 +973,7 @@ function mount(): void {
     syncVisualizationState(state);
     queuePresetCycleIfNeeded(state);
 
-    headerFileName.textContent = state.file?.name ?? getCurrentPlaylistItem()?.name ?? 'No file loaded';
+    headerFileName.textContent = state.source?.name ?? getCurrentPlaylistItem()?.name ?? 'No source loaded';
     modeSelect.value = state.playbackMode;
     logsOutput.textContent = state.logs.join('\n');
 
@@ -931,7 +990,7 @@ function mount(): void {
       state.playbackPhase === 'buffering' ||
       state.status === 'seeking';
     const showCenteredPlay =
-      Boolean(state.file) &&
+      Boolean(state.source) &&
       !isLoadingPhase &&
       state.playbackPhase !== 'playing' &&
       state.status !== 'playing' &&
@@ -944,13 +1003,19 @@ function mount(): void {
     viewerCenterButton.setAttribute('aria-label', isLoadingPhase ? 'Loading media' : 'Start playback');
 
     supportHint.textContent =
-      state.browserSupported === null
-        ? 'Open a local file from File > Open File.'
-        : state.browserSupported
-          ? state.probeStatus === 'running'
-            ? 'Native browser playback is ready. FFmpeg metadata is still being collected in the background.'
-            : 'Native browser playback is available for this file. FFmpeg mode can still be forced.'
-          : 'Native browser playback was not detected. FFmpeg fallback is active by default.';
+      !state.source
+        ? 'Open a local file or URL from the File menu.'
+        : state.source.kind === 'hls-playlist'
+          ? 'HLS playback is active for this source. Native HLS is used when available, otherwise HLS.js handles playback.'
+          : state.source.kind === 'remote-url'
+            ? state.browserSupported
+              ? 'This remote URL is using browser playback. FFmpeg fallback is not available for remote sources.'
+              : 'This remote URL is not supported by the browser. Remote FFmpeg fallback is not available in this version.'
+            : state.browserSupported
+              ? state.probeStatus === 'running'
+                ? 'Native browser playback is ready. FFmpeg metadata is still being collected in the background.'
+                : 'Native browser playback is available for this local file. FFmpeg mode can still be forced.'
+              : 'Native browser playback was not detected. FFmpeg fallback is active by default for this local file.';
 
     errorBox.textContent = state.error ?? '';
     errorBox.hidden = !state.error;
@@ -999,6 +1064,118 @@ function mount(): void {
     setMenu(null);
   }
 
+  function resetUrlDialog(): void {
+    urlDialogInput.value = '';
+    urlDialogError.hidden = true;
+    urlDialogError.textContent = '';
+  }
+
+  function openUrlDialog(mode: 'open-url' | 'import-playlist-url'): void {
+    urlDialogMode = mode;
+    resetUrlDialog();
+    urlDialogTitle.textContent = mode === 'open-url' ? 'Open URL' : 'Import Playlist URL';
+    urlDialogDescription.textContent =
+      mode === 'open-url'
+        ? 'Enter a direct media URL. Browser-playable formats open directly, and HLS playlists use native HLS or HLS.js.'
+        : 'Enter a playlist URL (.m3u or .m3u8). Standard M3U entries are imported into the playlist, and HLS manifests are added as a single stream source.';
+    urlDialogSubmit.textContent = mode === 'open-url' ? 'Open' : 'Import';
+    showDialog(urlDialog);
+    queueMicrotask(() => {
+      urlDialogInput.focus();
+    });
+  }
+
+  function showUrlDialogError(message: string): void {
+    urlDialogError.hidden = false;
+    urlDialogError.textContent = message;
+  }
+
+  function addSourcesToPlaylist(
+    sources: MediaSourceItem[],
+    options?: {
+      autoplayFirst?: boolean;
+      showPlaylist?: boolean;
+      markPreviousAsPlayed?: boolean;
+    },
+  ): void {
+    if (sources.length === 0) {
+      return;
+    }
+
+    const newItems = sources.map((source) => createPlaylistItem(source));
+    playlist = [...playlist, ...newItems];
+    if (options?.showPlaylist ?? true) {
+      playlistVisible = true;
+      rightPanelTab = 'playlist';
+    }
+
+    if (options?.autoplayFirst) {
+      void playPlaylistItem(newItems[0].id, {
+        autoplay: true,
+        markPreviousAsPlayed: options?.markPreviousAsPlayed,
+      });
+      return;
+    }
+
+    render(currentState);
+  }
+
+  function addFilesToPlaylist(
+    files: FileList | File[],
+    options?: {
+      autoplayFirst?: boolean;
+      showPlaylist?: boolean;
+      markPreviousAsPlayed?: boolean;
+    },
+  ): void {
+    addSourcesToPlaylist(Array.from(files).map((file) => createLocalFileSource(file)), options);
+  }
+
+  async function importPlaylistText(
+    text: string,
+    options?: {
+      baseUrl?: string;
+      playlistName?: string;
+      autoplayFirst?: boolean;
+    },
+  ): Promise<void> {
+    const parsedPlaylist = parseM3uPlaylist(text, {
+      baseUrl: options?.baseUrl,
+      playlistName: options?.playlistName,
+    });
+
+    if (parsedPlaylist.entries.length === 0) {
+      throw new Error('The playlist does not contain any playable entries.');
+    }
+
+    addSourcesToPlaylist(parsedPlaylist.entries, {
+      autoplayFirst: options?.autoplayFirst ?? false,
+      showPlaylist: true,
+    });
+  }
+
+  async function importPlaylistFromUrl(url: string): Promise<void> {
+    const response = await fetch(url);
+    if (!response.ok) {
+      throw new Error(`Playlist request failed with status ${response.status}.`);
+    }
+
+    const text = await response.text();
+    await importPlaylistText(text, {
+      baseUrl: url,
+      playlistName: getSourceName(createRemoteUrlSource(url)),
+      autoplayFirst: false,
+    });
+  }
+
+  async function importPlaylistFromFile(file: File): Promise<void> {
+    const text = await file.text();
+    await importPlaylistText(text, {
+      playlistName: file.name,
+      autoplayFirst: false,
+    });
+  }
+
   async function playPlaylistItem(
     itemId: string,
     options?: {
@@ -1016,42 +1193,12 @@ function mount(): void {
       markPreviousAsPlayed: options?.markPreviousAsPlayed,
     });
     render(currentState);
-    await controller.openFile(item.file);
+    await controller.openSource(item.source);
     loadedPresetId = null;
     if (autoplay) {
       await controller.play();
     }
     render(currentState);
-  }
-
-  function addFilesToPlaylist(
-    files: FileList | File[],
-    options?: {
-      autoplayFirst?: boolean;
-      showPlaylist?: boolean;
-      markPreviousAsPlayed?: boolean;
-    },
-  ): void {
-    const nextFiles = Array.from(files);
-    if (nextFiles.length === 0) {
-      return;
-    }
-
-    const newItems = nextFiles.map((file) => createPlaylistItem(file));
-    playlist = [...playlist, ...newItems];
-    if (options?.showPlaylist ?? true) {
-      playlistVisible = true;
-      rightPanelTab = 'playlist';
-    }
-
-    if (options?.autoplayFirst) {
-      void playPlaylistItem(newItems[0].id, {
-        autoplay: true,
-        markPreviousAsPlayed: options?.markPreviousAsPlayed,
-      });
-    } else {
-      render(currentState);
-    }
   }
 
   async function removePlaylistEntry(itemId: string): Promise<void> {
@@ -1152,9 +1299,24 @@ function mount(): void {
     openFileInput.click();
   });
 
+  openUrlButton.addEventListener('click', () => {
+    setMenu(null);
+    openUrlDialog('open-url');
+  });
+
   addFilesButton.addEventListener('click', () => {
     setMenu(null);
     playlistFileInput.click();
+  });
+
+  importPlaylistUrlButton.addEventListener('click', () => {
+    setMenu(null);
+    openUrlDialog('import-playlist-url');
+  });
+
+  importPlaylistFileButton.addEventListener('click', () => {
+    setMenu(null);
+    playlistImportInput.click();
   });
 
   playlistToggleButton.addEventListener('click', () => {
@@ -1297,6 +1459,42 @@ function mount(): void {
     showDialog(aboutDialog);
   });
 
+  urlDialogCancel.addEventListener('click', () => {
+    urlDialog.close();
+  });
+
+  urlDialog.addEventListener('close', () => {
+    resetUrlDialog();
+  });
+
+  urlDialogForm.addEventListener('submit', async (event) => {
+    event.preventDefault();
+    const normalizedUrl = normalizeUrlInput(urlDialogInput.value);
+    if (!normalizedUrl) {
+      showUrlDialogError('Enter a valid absolute URL.');
+      return;
+    }
+
+    try {
+      if (urlDialogMode === 'open-url') {
+        const source = /\.m3u8(?:$|[?#])/i.test(normalizedUrl)
+          ? createHlsPlaylistSource(normalizedUrl)
+          : createRemoteUrlSource(normalizedUrl);
+        addSourcesToPlaylist([source], {
+          autoplayFirst: true,
+          showPlaylist: true,
+          markPreviousAsPlayed: false,
+        });
+      } else {
+        await importPlaylistFromUrl(normalizedUrl);
+      }
+
+      urlDialog.close();
+    } catch (error) {
+      showUrlDialogError(error instanceof Error ? error.message : 'The URL could not be processed.');
+    }
+  });
+
   openFileInput.addEventListener('change', async () => {
     const file = openFileInput.files?.[0];
     openFileInput.value = '';
@@ -1325,6 +1523,21 @@ function mount(): void {
       autoplayFirst: false,
       showPlaylist: true,
     });
+  });
+
+  playlistImportInput.addEventListener('change', async () => {
+    const file = playlistImportInput.files?.[0];
+    playlistImportInput.value = '';
+    if (!file) {
+      return;
+    }
+
+    try {
+      await importPlaylistFromFile(file);
+    } catch (error) {
+      errorBox.textContent = error instanceof Error ? error.message : 'The playlist file could not be imported.';
+      errorBox.hidden = false;
+    }
   });
 
   modeSelect.addEventListener('change', async () => {
@@ -1404,7 +1617,7 @@ function mount(): void {
   });
 
   mediaElement.addEventListener('click', async () => {
-    if (!currentState.file) {
+    if (!currentState.source) {
       return;
     }
 
@@ -1417,7 +1630,7 @@ function mount(): void {
   });
 
   visualizationCanvas.addEventListener('click', async () => {
-    if (!currentState.file) {
+    if (!currentState.source) {
       return;
     }
 
@@ -1443,7 +1656,7 @@ function mount(): void {
 
   viewerCenterButton.addEventListener('click', async (event) => {
     event.stopPropagation();
-    if (!currentState.file || viewerCenterButton.disabled) {
+    if (!currentState.source || viewerCenterButton.disabled) {
       return;
     }
 

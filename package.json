@@ -14,7 +14,8 @@
     "@ffmpeg/ffmpeg": "^0.12.15",
     "@ffmpeg/util": "^0.12.2",
     "butterchurn": "^2.6.7",
-    "butterchurn-presets": "^2.4.7"
+    "butterchurn-presets": "^2.4.7",
+    "hls.js": "^1.6.15"
   },
   "devDependencies": {
     "@testing-library/dom": "^10.4.0",

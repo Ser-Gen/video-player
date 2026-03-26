@@ -2,6 +2,7 @@ export type PlaybackMode = 'auto' | 'browser' | 'ffmpeg';
 export type ResolvedEngine = 'browser' | 'ffmpeg';
 export type ProbeStatus = 'idle' | 'running' | 'completed' | 'failed';
 export type PlaylistItemStatus = 'pending' | 'played' | 'current';
+export type MediaSourceKind = 'local-file' | 'remote-url' | 'hls-playlist';
 export type RightPanelTab = 'playlist' | 'debug';
 export type PresetCycleIntervalSec = 30 | 60 | 120 | 300 | null;
 export type VisualizationUnavailableReason =
@@ -23,7 +24,9 @@ export type PlaybackErrorCode =
   | 'attach_failed'
   | 'codec_unsupported'
   | 'media_not_ready'
-  | 'play_rejected';
+  | 'play_rejected'
+  | 'remote_unsupported'
+  | 'hls_attach_failed';
 export type SessionStatus =
   | 'idle'
   | 'probing'
@@ -55,6 +58,27 @@ export interface MediaInfo {
   audio: AudioStreamInfo | null;
   rawLog: string;
 }
+
+export interface LocalFileMediaSource {
+  kind: 'local-file';
+  name: string;
+  file: File;
+}
+
+export interface RemoteUrlMediaSource {
+  kind: 'remote-url';
+  name: string;
+  url: string;
+  mimeType?: string | null;
+}
+
+export interface HlsPlaylistMediaSource {
+  kind: 'hls-playlist';
+  name: string;
+  url: string;
+}
+
+export type MediaSourceItem = LocalFileMediaSource | RemoteUrlMediaSource | HlsPlaylistMediaSource;
 
 export interface TranscodeSession {
   requestedTimeSec: number;
@@ -97,7 +121,7 @@ export interface VisualizationSupportState {
 }
 
 export interface PlayerState {
-  file: File | null;
+  source: MediaSourceItem | null;
   playbackMode: PlaybackMode;
   resolvedEngine: ResolvedEngine | null;
   status: SessionStatus;
@@ -129,6 +153,7 @@ export interface PlayerController {
   readonly state: PlayerState;
   readonly mediaElement: HTMLMediaElement;
   subscribe(listener: (state: PlayerState) => void): () => void;
+  openSource(source: MediaSourceItem): Promise<void>;
   openFile(file: File): Promise<void>;
   setMode(mode: PlaybackMode): Promise<void>;
   play(): Promise<void>;

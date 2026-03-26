@@ -1,4 +1,5 @@
-import type { CapabilityDetection } from './types';
+import type { CapabilityDetection, MediaSourceItem } from './types';
+import { isHlsMimeType } from './sourceUtils';
 
 const MIME_BY_EXTENSION: Record<string, string> = {
   mp4: 'video/mp4',
@@ -19,19 +20,41 @@ const MIME_BY_EXTENSION: Record<string, string> = {
   ogg: 'audio/ogg',
   oga: 'audio/ogg',
   opus: 'audio/ogg',
+  m3u8: 'application/vnd.apple.mpegurl',
+  m3u: 'audio/x-mpegurl',
 };
 
-export function inferMimeType(file: File): string {
-  if (file.type) {
-    return file.type;
+export function inferMimeTypeFromName(name: string, declaredMimeType?: string | null): string {
+  if (declaredMimeType) {
+    return declaredMimeType;
   }
 
-  const extension = file.name.split('.').pop()?.toLowerCase() ?? '';
+  const extension = name.split('.').pop()?.toLowerCase() ?? '';
   return MIME_BY_EXTENSION[extension] ?? 'application/octet-stream';
 }
 
-export function detectCapability(file: File, probeEl: HTMLMediaElement): CapabilityDetection {
-  const mimeType = inferMimeType(file);
+export function inferMimeType(source: File | MediaSourceItem): string {
+  if (source instanceof File) {
+    return inferMimeTypeFromName(source.name, source.type);
+  }
+
+  if (source.kind === 'local-file') {
+    return inferMimeTypeFromName(source.name, source.file.type);
+  }
+
+  if (source.kind === 'hls-playlist') {
+    return 'application/vnd.apple.mpegurl';
+  }
+
+  if (isHlsMimeType(source.mimeType)) {
+    return source.mimeType ?? 'application/vnd.apple.mpegurl';
+  }
+
+  return inferMimeTypeFromName(source.name, source.mimeType);
+}
+
+export function detectCapability(source: File | MediaSourceItem, probeEl: HTMLMediaElement): CapabilityDetection {
+  const mimeType = inferMimeType(source);
   const isAudioOnly = mimeType.startsWith('audio/');
   const playability = probeEl.canPlayType(mimeType);
 

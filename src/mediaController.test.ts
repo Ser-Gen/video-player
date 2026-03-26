@@ -1,4 +1,6 @@
 import { BrowserMediaPlayerController, resolvePlaybackEngine, type FFmpegAdapter } from './mediaController';
+import type { HlsClient, HlsClientFactory } from './hlsPlayback';
+import { createHlsPlaylistSource, createRemoteUrlSource } from './sourceUtils';
 import type { MediaInfo } from './types';
 
 function createMediaInfo(): MediaInfo {
@@ -110,6 +112,50 @@ class FailingProbeFFmpegService extends MockFFmpegService {
   override async probe(): Promise<MediaInfo> {
     this.probeCalls += 1;
     throw new Error('Probe crashed');
+  }
+}
+
+class MockHlsClient implements HlsClient {
+  attachedMedia: HTMLMediaElement | null = null;
+  loadedSource: string | null = null;
+  destroyed = false;
+  private listeners = new Map<string, Array<(...args: unknown[]) => void>>();
+
+  attachMedia(media: HTMLMediaElement): void {
+    this.attachedMedia = media;
+    this.emit('hlsMediaAttached');
+  }
+
+  loadSource(url: string): void {
+    this.loadedSource = url;
+  }
+
+  destroy(): void {
+    this.destroyed = true;
+  }
+
+  on(event: string, listener: (...args: unknown[]) => void): void {
+    this.listeners.set(event, [...(this.listeners.get(event) ?? []), listener]);
+  }
+
+  private emit(event: string, ...args: unknown[]): void {
+    for (const listener of this.listeners.get(event) ?? []) {
+      listener(...args);
+    }
+  }
+}
+
+class MockHlsFactory implements HlsClientFactory {
+  createdClients: MockHlsClient[] = [];
+
+  create(): HlsClient {
+    const client = new MockHlsClient();
+    this.createdClients.push(client);
+    return client;
+  }
+
+  isSupported(): boolean {
+    return true;
   }
 }
 
@@ -231,8 +277,74 @@ describe('BrowserMediaPlayerController', () => {
     await controller.openFile(file);
 
     expect(ffmpegService.transcodeCalls).toEqual([0, 0]);
-    expect(controller.state.file).toBe(file);
+    expect(controller.state.source?.kind).toBe('local-file');
+    expect(controller.state.source?.kind === 'local-file' ? controller.state.source.file : null).toBe(file);
     expect(controller.state.resolvedEngine).toBe('ffmpeg');
+  });
+
+  it('rejects unsupported remote urls without invoking ffmpeg', async () => {
+    const mediaElement = document.createElement('video');
+    const probeElement = document.createElement('video');
+    const ffmpegService = new MockFFmpegService();
+    vi.spyOn(probeElement, 'canPlayType').mockReturnValue('');
+
+    const controller = new BrowserMediaPlayerController(mediaElement, {
+      ffmpegService,
+      probeElement,
+    });
+
+    await controller.openSource(createRemoteUrlSource('https://example.com/movie.mkv'));
+
+    expect(controller.state.error).toContain('Remote FFmpeg fallback is not available');
+    expect(controller.state.lastPlaybackError?.code).toBe('remote_unsupported');
+    expect(ffmpegService.probeCalls).toBe(0);
+    expect(ffmpegService.transcodeCalls).toEqual([]);
+  });
+
+  it('attaches hls.js playback when native hls is unavailable', async () => {
+    const mediaElement = document.createElement('video');
+    const probeElement = document.createElement('video');
+    const hlsFactory = new MockHlsFactory();
+    vi.spyOn(probeElement, 'canPlayType').mockImplementation((mimeType: string) =>
+      mimeType === 'application/vnd.apple.mpegurl' ? '' : 'probably',
+    );
+
+    const controller = new BrowserMediaPlayerController(mediaElement, {
+      ffmpegService: new MockFFmpegService(),
+      probeElement,
+      hlsFactory,
+    });
+
+    await controller.openSource(createHlsPlaylistSource('https://example.com/live.m3u8'));
+
+    expect(hlsFactory.createdClients).toHaveLength(1);
+    expect(hlsFactory.createdClients[0].attachedMedia).toBe(mediaElement);
+    expect(hlsFactory.createdClients[0].loadedSource).toBe('https://example.com/live.m3u8');
+    expect(controller.state.resolvedEngine).toBe('browser');
+    expect(controller.state.error).toBeNull();
+  });
+
+  it('destroys hls instance when switching away from hls playback', async () => {
+    const mediaElement = document.createElement('video');
+    const probeElement = document.createElement('video');
+    const hlsFactory = new MockHlsFactory();
+    vi.spyOn(probeElement, 'canPlayType').mockImplementation((mimeType: string) =>
+      mimeType === 'application/vnd.apple.mpegurl' ? '' : 'probably',
+    );
+
+    const controller = new BrowserMediaPlayerController(mediaElement, {
+      ffmpegService: new MockFFmpegService(),
+      probeElement,
+      hlsFactory,
+    });
+
+    await controller.openSource(createHlsPlaylistSource('https://example.com/live.m3u8'));
+    const hlsClient = hlsFactory.createdClients[0];
+
+    await controller.openSource(createRemoteUrlSource('https://example.com/clip.mp4'));
+
+    expect(hlsClient.destroyed).toBe(true);
+    expect(mediaElement.src).toContain('https://example.com/clip.mp4');
   });
 
   it('stops browser playback and resets time to zero', async () => {

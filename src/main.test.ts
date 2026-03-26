@@ -75,6 +75,20 @@ async function loadMain(options?: MainMockOptions) {
     },
   }));
 
+  vi.doMock('./hlsPlayback', () => ({
+    HLS_MEDIA_ATTACHED_EVENT: 'hlsMediaAttached',
+    HLS_ERROR_EVENT: 'hlsError',
+    defaultHlsClientFactory: {
+      create: () => ({
+        attachMedia: () => undefined,
+        loadSource: () => undefined,
+        destroy: () => undefined,
+        on: () => undefined,
+      }),
+      isSupported: () => true,
+    },
+  }));
+
   await import('./main');
 }
 
@@ -84,6 +98,11 @@ describe('main ui', () => {
     document.body.innerHTML = '<div id="app"></div>';
     vi.resetModules();
     vi.clearAllMocks();
+    vi.stubGlobal('fetch', vi.fn());
+  });
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
   });
 
   it('restores saved volume settings on mount', async () => {
@@ -230,6 +249,58 @@ describe('main ui', () => {
     await userEvent.click(visualizationCanvas);
     await waitFor(() => {
       expect(pauseSpy).toHaveBeenCalled();
+    });
+  });
+
+  it('opens a remote url from the file menu and adds it to the playlist', async () => {
+    await loadMain();
+
+    await userEvent.click(document.querySelector<HTMLButtonElement>('#file-menu-button')!);
+    await userEvent.click(document.querySelector<HTMLButtonElement>('#open-url-button')!);
+    await userEvent.type(document.querySelector<HTMLInputElement>('#url-dialog-input')!, 'https://example.com/video.mp4');
+    await userEvent.click(document.querySelector<HTMLButtonElement>('#url-dialog-submit')!);
+
+    await waitFor(() => {
+      expect(document.querySelector<HTMLElement>('#header-file-name')?.textContent).toContain('video.mp4');
+      expect(document.querySelector<HTMLElement>('#playlist-list')?.textContent).toContain('video.mp4');
+    });
+  });
+
+  it('imports playlist entries from a playlist url', async () => {
+    vi.mocked(fetch).mockResolvedValue(
+      new Response('#EXTM3U\n#EXTINF:-1,Remote Clip\nhttps://cdn.example.com/clip.mp4', { status: 200 }),
+    );
+
+    await loadMain();
+
+    await userEvent.click(document.querySelector<HTMLButtonElement>('#file-menu-button')!);
+    await userEvent.click(document.querySelector<HTMLButtonElement>('#import-playlist-url-button')!);
+    await userEvent.type(document.querySelector<HTMLInputElement>('#url-dialog-input')!, 'https://example.com/list.m3u8');
+    await userEvent.click(document.querySelector<HTMLButtonElement>('#url-dialog-submit')!);
+
+    await waitFor(() => {
+      expect(fetch).toHaveBeenCalledWith('https://example.com/list.m3u8');
+      expect(document.querySelector<HTMLElement>('#playlist-list')?.textContent).toContain('Remote Clip');
+    });
+  });
+
+  it('imports playlist entries from a local playlist file', async () => {
+    await loadMain();
+
+    const playlistImportInput = document.querySelector<HTMLInputElement>('#playlist-import-input')!;
+    const playlistFile = new File(
+      ['#EXTM3U\n#EXTINF:-1,Local Stream\nhttps://media.example.com/live.mp3'],
+      'channels.m3u8',
+      { type: 'application/vnd.apple.mpegurl' },
+    );
+    Object.defineProperty(playlistFile, 'text', {
+      value: vi.fn().mockResolvedValue('#EXTM3U\n#EXTINF:-1,Local Stream\nhttps://media.example.com/live.mp3'),
+    });
+
+    await userEvent.upload(playlistImportInput, playlistFile);
+
+    await waitFor(() => {
+      expect(document.querySelector<HTMLElement>('#playlist-list')?.textContent).toContain('Local Stream');
     });
   });
 });

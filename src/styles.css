@@ -496,6 +496,14 @@ select {
   color: var(--text);
 }
 
+.dialog-input {
+  min-height: 40px;
+  padding: 0 12px;
+  border: 1px solid var(--border);
+  background: var(--bg-elevated);
+  color: var(--text);
+}
+
 .meta-grid {
   display: grid;
   grid-template-columns: 1fr;
@@ -656,6 +664,12 @@ dd {
 .about-dialog-form h2,
 .about-dialog-form p {
   margin: 0;
+}
+
+.dialog-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
 }
 
 @keyframes spin {

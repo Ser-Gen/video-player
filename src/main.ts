@@ -1,6 +1,7 @@
 import './styles.css';
 import { BrowserMediaPlayerController } from './mediaController';
-import type { PlaybackMode, PlayerState } from './types';
+import { getAdjacentIndexAfterRemoval, markPlaylistItemPlayed, movePlaylistItem, setCurrentPlaylistItem, type PlaylistItem } from './playlist';
+import type { PlaybackMode, PlayerState, RightPanelTab } from './types';
 import { formatTime, timelineRatioFromClientX, timelineTimeFromRatio } from './uiHelpers';
 
 function requireElement<T extends Element>(value: T | null, message: string): T {
@@ -50,6 +51,49 @@ function bindCopyButton(button: HTMLButtonElement, getText: () => string): void 
   });
 }
 
+const VOLUME_STORAGE_KEY = 'video-player:volume-settings';
+
+function readStoredVolumeSettings(): { volume: number; muted: boolean } | null {
+  try {
+    const rawValue = window.localStorage.getItem(VOLUME_STORAGE_KEY);
+    if (!rawValue) {
+      return null;
+    }
+
+    const parsedValue = JSON.parse(rawValue) as {
+      volume?: unknown;
+      muted?: unknown;
+    };
+    const volume =
+      typeof parsedValue.volume === 'number' && Number.isFinite(parsedValue.volume)
+        ? Math.min(1, Math.max(0, parsedValue.volume))
+        : null;
+    const muted = typeof parsedValue.muted === 'boolean' ? parsedValue.muted : null;
+
+    if (volume === null || muted === null) {
+      return null;
+    }
+
+    return { volume, muted };
+  } catch {
+    return null;
+  }
+}
+
+function writeStoredVolumeSettings(volume: number, muted: boolean): void {
+  try {
+    window.localStorage.setItem(
+      VOLUME_STORAGE_KEY,
+      JSON.stringify({
+        volume: Math.min(1, Math.max(0, volume)),
+        muted,
+      }),
+    );
+  } catch {
+    // Ignore storage failures so media controls keep working in restricted contexts.
+  }
+}
+
 function mount(): void {
   const app = document.querySelector<HTMLDivElement>('#app');
   if (!app) {
@@ -58,7 +102,8 @@ function mount(): void {
 
   app.innerHTML = `
     <main class="app-shell">
-      <input id="file-input" class="hidden-file-input" type="file" accept="audio/*,video/*,.mkv,.avi,.mov,.flac,.ts,.m2ts,.ogg,.opus" />
+      <input id="open-file-input" class="hidden-file-input" type="file" accept="audio/*,video/*,.mkv,.avi,.mov,.flac,.ts,.m2ts,.ogg,.opus" />
+      <input id="playlist-file-input" class="hidden-file-input" type="file" accept="audio/*,video/*,.mkv,.avi,.mov,.flac,.ts,.m2ts,.ogg,.opus" multiple />
 
       <header class="menu-bar">
         <div class="menu-group">
@@ -66,6 +111,14 @@ function mount(): void {
             <button id="file-menu-button" class="menu-trigger" type="button" aria-haspopup="true" aria-expanded="false">File</button>
             <div id="file-menu" class="menu-dropdown" hidden>
               <button id="open-file-button" class="menu-action" type="button">Open File</button>
+              <button id="add-files-button" class="menu-action" type="button">Add Files to Playlist</button>
+            </div>
+          </div>
+          <div class="menu-item-wrap">
+            <button id="view-menu-button" class="menu-trigger" type="button" aria-haspopup="true" aria-expanded="false">View</button>
+            <div id="view-menu" class="menu-dropdown" hidden>
+              <button id="playlist-toggle-button" class="menu-action" type="button">Playlist</button>
+              <button id="debug-toggle-button" class="menu-action" type="button">Debug</button>
             </div>
           </div>
           <div class="menu-item-wrap">
@@ -83,12 +136,14 @@ function mount(): void {
       <section class="workspace">
         <section class="viewer-section">
           <div class="viewer-stage">
-            <video id="media-element" playsinline preload="metadata"></video>
-            <div id="viewer-center-overlay" class="viewer-center-overlay" hidden>
-              <button id="viewer-center-button" class="viewer-center-button" type="button" aria-label="Start playback">
-                <span id="viewer-center-spinner" class="spinner" hidden aria-hidden="true"></span>
-                <span id="viewer-center-icon" class="viewer-center-icon" aria-hidden="true">▶</span>
-              </button>
+            <div class="viewer-media-surface">
+              <video id="media-element" playsinline preload="metadata"></video>
+              <div id="viewer-center-overlay" class="viewer-center-overlay" hidden>
+                <button id="viewer-center-button" class="viewer-center-button" type="button" aria-label="Start playback">
+                  <span id="viewer-center-spinner" class="spinner" hidden aria-hidden="true"></span>
+                  <span id="viewer-center-icon" class="viewer-center-icon" aria-hidden="true">▶</span>
+                </button>
+              </div>
             </div>
 
             <div class="viewer-overlay">
@@ -101,8 +156,14 @@ function mount(): void {
                   </div>
                 </div>
                 <div class="control-group control-group-left">
+                  <button id="previous-button" class="control-button icon-button" type="button" aria-label="Previous track">
+                    <span aria-hidden="true">⏮</span>
+                  </button>
                   <button id="play-toggle-button" class="control-button accent icon-button" type="button" aria-label="Play">
                     <span id="play-toggle-icon" aria-hidden="true">▶</span>
+                  </button>
+                  <button id="next-button" class="control-button icon-button" type="button" aria-label="Next track">
+                    <span aria-hidden="true">⏭</span>
                   </button>
                   <button id="stop-button" class="control-button icon-button" type="button" aria-label="Stop">
                     <span aria-hidden="true">■</span>
@@ -126,46 +187,61 @@ function mount(): void {
           </div>
         </section>
 
-        <aside class="sidebar">
-          <section class="sidebar-section">
+        <aside id="sidebar" class="sidebar" hidden>
+          <div id="right-panel-tabs" class="right-panel-tabs" hidden>
+            <button id="playlist-tab-button" class="panel-tab" type="button">Playlist</button>
+            <button id="debug-tab-button" class="panel-tab" type="button">Debug</button>
+          </div>
+
+          <section id="playlist-panel" class="sidebar-panel" hidden>
             <div class="section-head">
-              <h2>Session</h2>
+              <h2>Playlist</h2>
             </div>
-            <div class="stack-field">
-              <label class="stack-label" for="mode-select">Playback mode</label>
-              <select id="mode-select">
-                <option value="auto">Auto</option>
-                <option value="browser">Browser</option>
-                <option value="ffmpeg">FFmpeg</option>
-              </select>
-            </div>
-            <div id="session-grid" class="meta-grid"></div>
-            <p id="support-hint" class="sidebar-note"></p>
-            <p id="error-box" class="error-box" hidden></p>
+            <div id="playlist-empty" class="sidebar-note">Playlist is empty.</div>
+            <div id="playlist-list" class="playlist-list"></div>
           </section>
 
-          <section class="sidebar-section">
-            <div class="section-head">
-              <h2>Media Info</h2>
-            </div>
-            <dl id="media-info" class="meta-grid"></dl>
-          </section>
+          <section id="debug-panel" class="sidebar-panel" hidden>
+            <section class="sidebar-section">
+              <div class="section-head">
+                <h2>Session</h2>
+              </div>
+              <div class="stack-field">
+                <label class="stack-label" for="mode-select">Playback mode</label>
+                <select id="mode-select">
+                  <option value="auto">Auto</option>
+                  <option value="browser">Browser</option>
+                  <option value="ffmpeg">FFmpeg</option>
+                </select>
+              </div>
+              <div id="session-grid" class="meta-grid"></div>
+              <p id="support-hint" class="sidebar-note"></p>
+              <p id="error-box" class="error-box" hidden></p>
+            </section>
 
-          <section class="sidebar-section">
-            <div class="section-head">
-              <h2>Playback Diagnostics</h2>
-              <button id="copy-diag-button" class="copy-button" type="button" data-label="Copy">Copy</button>
-            </div>
-            <div id="diag-summary" class="meta-grid"></div>
-            <pre id="diag-output" class="log-output"></pre>
-          </section>
+            <section class="sidebar-section">
+              <div class="section-head">
+                <h2>Media Info</h2>
+              </div>
+              <dl id="media-info" class="meta-grid"></dl>
+            </section>
 
-          <section class="sidebar-section">
-            <div class="section-head">
-              <h2>Raw FFmpeg Log</h2>
-              <button id="copy-logs-button" class="copy-button" type="button" data-label="Copy">Copy</button>
-            </div>
-            <pre id="logs-output" class="log-output"></pre>
+            <section class="sidebar-section">
+              <div class="section-head">
+                <h2>Playback Diagnostics</h2>
+                <button id="copy-diag-button" class="copy-button" type="button" data-label="Copy">Copy</button>
+              </div>
+              <div id="diag-summary" class="meta-grid"></div>
+              <pre id="diag-output" class="log-output"></pre>
+            </section>
+
+            <section class="sidebar-section">
+              <div class="section-head">
+                <h2>Raw FFmpeg Log</h2>
+                <button id="copy-logs-button" class="copy-button" type="button" data-label="Copy">Copy</button>
+              </div>
+              <pre id="logs-output" class="log-output"></pre>
+            </section>
           </section>
         </aside>
       </section>
@@ -181,33 +257,29 @@ function mount(): void {
     </main>
   `;
 
-  const fileInput = requireElement(app.querySelector<HTMLInputElement>('#file-input'), 'File input not found');
+  const openFileInput = requireElement(app.querySelector<HTMLInputElement>('#open-file-input'), 'Open file input not found');
+  const playlistFileInput = requireElement(app.querySelector<HTMLInputElement>('#playlist-file-input'), 'Playlist file input not found');
   const mediaElement = requireElement(app.querySelector<HTMLVideoElement>('#media-element'), 'Media element not found');
-  const viewerCenterOverlay = requireElement(
-    app.querySelector<HTMLDivElement>('#viewer-center-overlay'),
-    'Viewer center overlay not found',
-  );
-  const viewerCenterButton = requireElement(
-    app.querySelector<HTMLButtonElement>('#viewer-center-button'),
-    'Viewer center button not found',
-  );
-  const viewerCenterSpinner = requireElement(
-    app.querySelector<HTMLElement>('#viewer-center-spinner'),
-    'Viewer center spinner not found',
-  );
-  const viewerCenterIcon = requireElement(
-    app.querySelector<HTMLElement>('#viewer-center-icon'),
-    'Viewer center icon not found',
-  );
+  const viewerCenterOverlay = requireElement(app.querySelector<HTMLDivElement>('#viewer-center-overlay'), 'Viewer center overlay not found');
+  const viewerCenterButton = requireElement(app.querySelector<HTMLButtonElement>('#viewer-center-button'), 'Viewer center button not found');
+  const viewerCenterSpinner = requireElement(app.querySelector<HTMLElement>('#viewer-center-spinner'), 'Viewer center spinner not found');
+  const viewerCenterIcon = requireElement(app.querySelector<HTMLElement>('#viewer-center-icon'), 'Viewer center icon not found');
   const fileMenuButton = requireElement(app.querySelector<HTMLButtonElement>('#file-menu-button'), 'File menu button not found');
+  const viewMenuButton = requireElement(app.querySelector<HTMLButtonElement>('#view-menu-button'), 'View menu button not found');
   const helpMenuButton = requireElement(app.querySelector<HTMLButtonElement>('#help-menu-button'), 'Help menu button not found');
   const fileMenu = requireElement(app.querySelector<HTMLDivElement>('#file-menu'), 'File menu not found');
+  const viewMenu = requireElement(app.querySelector<HTMLDivElement>('#view-menu'), 'View menu not found');
   const helpMenu = requireElement(app.querySelector<HTMLDivElement>('#help-menu'), 'Help menu not found');
   const openFileButton = requireElement(app.querySelector<HTMLButtonElement>('#open-file-button'), 'Open file button not found');
+  const addFilesButton = requireElement(app.querySelector<HTMLButtonElement>('#add-files-button'), 'Add files button not found');
+  const playlistToggleButton = requireElement(app.querySelector<HTMLButtonElement>('#playlist-toggle-button'), 'Playlist toggle button not found');
+  const debugToggleButton = requireElement(app.querySelector<HTMLButtonElement>('#debug-toggle-button'), 'Debug toggle button not found');
   const aboutButton = requireElement(app.querySelector<HTMLButtonElement>('#about-button'), 'About button not found');
   const aboutDialog = requireElement(app.querySelector<HTMLDialogElement>('#about-dialog'), 'About dialog not found');
+  const previousButton = requireElement(app.querySelector<HTMLButtonElement>('#previous-button'), 'Previous button not found');
   const playToggleButton = requireElement(app.querySelector<HTMLButtonElement>('#play-toggle-button'), 'Play toggle button not found');
   const playToggleIcon = requireElement(app.querySelector<HTMLElement>('#play-toggle-icon'), 'Play toggle icon not found');
+  const nextButton = requireElement(app.querySelector<HTMLButtonElement>('#next-button'), 'Next button not found');
   const stopButton = requireElement(app.querySelector<HTMLButtonElement>('#stop-button'), 'Stop button not found');
   const muteButton = requireElement(app.querySelector<HTMLButtonElement>('#mute-button'), 'Mute button not found');
   const muteIcon = requireElement(app.querySelector<HTMLElement>('#mute-icon'), 'Mute icon not found');
@@ -219,6 +291,14 @@ function mount(): void {
   const timelineTooltip = requireElement(app.querySelector<HTMLDivElement>('#timeline-tooltip'), 'Timeline tooltip not found');
   const transportTime = requireElement(app.querySelector<HTMLElement>('#transport-time'), 'Transport time not found');
   const headerFileName = requireElement(app.querySelector<HTMLElement>('#header-file-name'), 'Header file name not found');
+  const sidebar = requireElement(app.querySelector<HTMLElement>('#sidebar'), 'Sidebar not found');
+  const rightPanelTabs = requireElement(app.querySelector<HTMLElement>('#right-panel-tabs'), 'Right panel tabs not found');
+  const playlistTabButton = requireElement(app.querySelector<HTMLButtonElement>('#playlist-tab-button'), 'Playlist tab button not found');
+  const debugTabButton = requireElement(app.querySelector<HTMLButtonElement>('#debug-tab-button'), 'Debug tab button not found');
+  const playlistPanel = requireElement(app.querySelector<HTMLElement>('#playlist-panel'), 'Playlist panel not found');
+  const debugPanel = requireElement(app.querySelector<HTMLElement>('#debug-panel'), 'Debug panel not found');
+  const playlistEmpty = requireElement(app.querySelector<HTMLElement>('#playlist-empty'), 'Playlist empty state not found');
+  const playlistList = requireElement(app.querySelector<HTMLDivElement>('#playlist-list'), 'Playlist list not found');
   const sessionGrid = requireElement(app.querySelector<HTMLDivElement>('#session-grid'), 'Session grid not found');
   const mediaInfo = requireElement(app.querySelector<HTMLDListElement>('#media-info'), 'Media info not found');
   const diagSummary = requireElement(app.querySelector<HTMLDivElement>('#diag-summary'), 'Diag summary not found');
@@ -231,20 +311,65 @@ function mount(): void {
 
   const controller = new BrowserMediaPlayerController(mediaElement);
   let currentState: PlayerState = controller.state;
-  let activeMenu: 'file' | 'help' | null = null;
+  let activeMenu: 'file' | 'view' | 'help' | null = null;
   let hoverTimeSec: number | null = null;
   let hoverRatio = 0;
+  let rightPanelTab: RightPanelTab = 'playlist';
+  let playlistVisible = false;
+  let debugVisible = false;
+  let playlist: PlaylistItem[] = [];
+  let playlistCounter = 0;
+  let draggedPlaylistItemId: string | null = null;
+  let autoAdvanceInProgress = false;
 
-  mediaElement.volume = 1;
-  mediaElement.muted = false;
+  const storedVolumeSettings = readStoredVolumeSettings();
+  mediaElement.volume = storedVolumeSettings?.volume ?? 1;
+  mediaElement.muted = storedVolumeSettings?.muted ?? false;
+  volumeInput.value = `${Math.round((mediaElement.muted ? 0 : mediaElement.volume) * 100)}`;
   bindCopyButton(copyDiagButton, () => diagOutput.textContent ?? '');
   bindCopyButton(copyLogsButton, () => logsOutput.textContent ?? '');
 
-  function setMenu(menu: 'file' | 'help' | null): void {
+  function createPlaylistItem(file: File): PlaylistItem {
+    playlistCounter += 1;
+    return {
+      id: `playlist-${playlistCounter}`,
+      file,
+      name: file.name,
+      status: 'pending',
+    };
+  }
+
+  function getCurrentPlaylistItem(): PlaylistItem | null {
+    return playlist.find((item) => item.status === 'current') ?? null;
+  }
+
+  function hasVisibleRightPanel(): boolean {
+    return playlistVisible || debugVisible;
+  }
+
+  function resolveRightPanelTab(): void {
+    if (playlistVisible && !debugVisible) {
+      rightPanelTab = 'playlist';
+      return;
+    }
+
+    if (debugVisible && !playlistVisible) {
+      rightPanelTab = 'debug';
+      return;
+    }
+
+    if (!playlistVisible && !debugVisible) {
+      rightPanelTab = 'playlist';
+    }
+  }
+
+  function setMenu(menu: 'file' | 'view' | 'help' | null): void {
     activeMenu = menu;
     fileMenu.hidden = menu !== 'file';
+    viewMenu.hidden = menu !== 'view';
     helpMenu.hidden = menu !== 'help';
     fileMenuButton.setAttribute('aria-expanded', String(menu === 'file'));
+    viewMenuButton.setAttribute('aria-expanded', String(menu === 'view'));
     helpMenuButton.setAttribute('aria-expanded', String(menu === 'help'));
   }
 
@@ -333,11 +458,42 @@ function mount(): void {
     timelineHoverMarker.style.left = `${hoverRatio * 100}%`;
   }
 
+  function renderPlaylist(): void {
+    playlistEmpty.hidden = playlist.length > 0;
+    playlistList.innerHTML = playlist
+      .map(
+        (item) => `
+          <div class="playlist-item playlist-item--${item.status}" data-playlist-id="${item.id}" draggable="true">
+            <button class="playlist-handle" type="button" aria-label="Reorder item" data-playlist-drag="${item.id}">⋮⋮</button>
+            <button class="playlist-entry" type="button" data-playlist-play="${item.id}">
+              <span class="playlist-entry-name">${item.name}</span>
+            </button>
+            <button class="playlist-remove" type="button" aria-label="Remove item" data-playlist-remove="${item.id}">×</button>
+          </div>
+        `,
+      )
+      .join('');
+  }
+
+  function renderRightPanel(): void {
+    resolveRightPanelTab();
+    sidebar.hidden = !hasVisibleRightPanel();
+    rightPanelTabs.hidden = !(playlistVisible && debugVisible);
+    playlistPanel.hidden = !playlistVisible || rightPanelTab !== 'playlist';
+    debugPanel.hidden = !debugVisible || rightPanelTab !== 'debug';
+    playlistTabButton.classList.toggle('panel-tab--active', rightPanelTab === 'playlist');
+    debugTabButton.classList.toggle('panel-tab--active', rightPanelTab === 'debug');
+    playlistToggleButton.textContent = playlistVisible ? 'Playlist ✓' : 'Playlist';
+    debugToggleButton.textContent = debugVisible ? 'Debug ✓' : 'Debug';
+    renderPlaylist();
+  }
+
   function render(state: PlayerState): void {
     currentState = state;
-    headerFileName.textContent = state.file?.name ?? 'No file loaded';
+    headerFileName.textContent = state.file?.name ?? getCurrentPlaylistItem()?.name ?? 'No file loaded';
     modeSelect.value = state.playbackMode;
     logsOutput.textContent = state.logs.join('\n');
+
     const isPlaying = state.status === 'playing';
     playToggleButton.setAttribute('aria-label', isPlaying ? 'Pause' : 'Play');
     playToggleIcon.textContent = isPlaying ? '⏸' : '▶';
@@ -379,6 +535,124 @@ function mount(): void {
     renderMediaInfo(state);
     renderDiagnostics(state);
     renderTimeline(state);
+    renderRightPanel();
+  }
+
+  async function playPlaylistItem(
+    itemId: string,
+    options?: {
+      autoplay?: boolean;
+      markPreviousAsPlayed?: boolean;
+    },
+  ): Promise<void> {
+    const item = playlist.find((entry) => entry.id === itemId);
+    if (!item) {
+      return;
+    }
+
+    const autoplay = options?.autoplay ?? true;
+    playlist = setCurrentPlaylistItem(playlist, itemId, {
+      markPreviousAsPlayed: options?.markPreviousAsPlayed,
+    });
+    render(currentState);
+    await controller.openFile(item.file);
+    if (autoplay) {
+      await controller.play();
+    }
+    render(currentState);
+  }
+
+  function addFilesToPlaylist(
+    files: FileList | File[],
+    options?: {
+      autoplayFirst?: boolean;
+      showPlaylist?: boolean;
+      markPreviousAsPlayed?: boolean;
+    },
+  ): void {
+    const nextFiles = Array.from(files);
+    if (nextFiles.length === 0) {
+      return;
+    }
+
+    const newItems = nextFiles.map((file) => createPlaylistItem(file));
+    playlist = [...playlist, ...newItems];
+    if (options?.showPlaylist ?? true) {
+      playlistVisible = true;
+      rightPanelTab = 'playlist';
+    }
+
+    if (options?.autoplayFirst) {
+      void playPlaylistItem(newItems[0].id, {
+        autoplay: true,
+        markPreviousAsPlayed: options?.markPreviousAsPlayed,
+      });
+    } else {
+      render(currentState);
+    }
+  }
+
+  async function removePlaylistEntry(itemId: string): Promise<void> {
+    const removedIndex = playlist.findIndex((item) => item.id === itemId);
+    if (removedIndex < 0) {
+      return;
+    }
+
+    const removingCurrent = playlist[removedIndex]?.status === 'current';
+    const nextPlaylist = playlist.filter((item) => item.id !== itemId);
+    playlist = nextPlaylist;
+
+    if (!removingCurrent) {
+      render(currentState);
+      return;
+    }
+
+    const nextIndex = getAdjacentIndexAfterRemoval(removedIndex, playlist.length);
+    if (nextIndex === null) {
+      await controller.stop();
+      render(currentState);
+      return;
+    }
+
+    await playPlaylistItem(playlist[nextIndex].id, { autoplay: true });
+  }
+
+  async function playNextPlaylistItem(): Promise<void> {
+    const currentItem = getCurrentPlaylistItem();
+    if (!currentItem) {
+      return;
+    }
+
+    const currentIndex = playlist.findIndex((item) => item.id === currentItem.id);
+    if (currentIndex < 0) {
+      return;
+    }
+
+    playlist = markPlaylistItemPlayed(playlist, currentItem.id);
+    const nextItem = playlist[currentIndex + 1];
+    if (!nextItem) {
+      render(currentState);
+      return;
+    }
+
+    await playPlaylistItem(nextItem.id, { autoplay: true });
+  }
+
+  async function playPreviousPlaylistItem(): Promise<void> {
+    const currentItem = getCurrentPlaylistItem();
+    if (!currentItem) {
+      return;
+    }
+
+    const currentIndex = playlist.findIndex((item) => item.id === currentItem.id);
+    if (currentIndex <= 0) {
+      return;
+    }
+
+    await playPlaylistItem(playlist[currentIndex - 1].id, {
+      autoplay: true,
+      markPreviousAsPlayed: false,
+    });
   }
 
   function updateHoverFromPointer(clientX: number): void {
@@ -395,6 +669,11 @@ function mount(): void {
     setMenu(activeMenu === 'file' ? null : 'file');
   });
 
+  viewMenuButton.addEventListener('click', (event) => {
+    event.stopPropagation();
+    setMenu(activeMenu === 'view' ? null : 'view');
+  });
+
   helpMenuButton.addEventListener('click', (event) => {
     event.stopPropagation();
     setMenu(activeMenu === 'help' ? null : 'help');
@@ -406,7 +685,40 @@ function mount(): void {
 
   openFileButton.addEventListener('click', () => {
     setMenu(null);
-    fileInput.click();
+    openFileInput.click();
+  });
+
+  addFilesButton.addEventListener('click', () => {
+    setMenu(null);
+    playlistFileInput.click();
+  });
+
+  playlistToggleButton.addEventListener('click', () => {
+    playlistVisible = !playlistVisible;
+    if (playlistVisible) {
+      rightPanelTab = 'playlist';
+    }
+    setMenu(null);
+    render(currentState);
+  });
+
+  debugToggleButton.addEventListener('click', () => {
+    debugVisible = !debugVisible;
+    if (debugVisible && !playlistVisible) {
+      rightPanelTab = 'debug';
+    }
+    setMenu(null);
+    render(currentState);
+  });
+
+  playlistTabButton.addEventListener('click', () => {
+    rightPanelTab = 'playlist';
+    render(currentState);
+  });
+
+  debugTabButton.addEventListener('click', () => {
+    rightPanelTab = 'debug';
+    render(currentState);
   });
 
   aboutButton.addEventListener('click', () => {
@@ -414,12 +726,34 @@ function mount(): void {
     aboutDialog.showModal();
   });
 
-  fileInput.addEventListener('change', async () => {
-    const file = fileInput.files?.[0];
+  openFileInput.addEventListener('change', async () => {
+    const file = openFileInput.files?.[0];
+    openFileInput.value = '';
     if (!file) {
       return;
     }
-    await controller.openFile(file);
+
+    addFilesToPlaylist([file], {
+      autoplayFirst: true,
+      showPlaylist: true,
+      markPreviousAsPlayed: false,
+    });
+  });
+
+  playlistFileInput.addEventListener('change', () => {
+    const files = playlistFileInput.files;
+    if (!files || files.length === 0) {
+      playlistFileInput.value = '';
+      return;
+    }
+
+    const selectedFiles = Array.from(files);
+    playlistFileInput.value = '';
+
+    addFilesToPlaylist(selectedFiles, {
+      autoplayFirst: false,
+      showPlaylist: true,
+    });
   });
 
   modeSelect.addEventListener('change', async () => {
@@ -433,6 +767,14 @@ function mount(): void {
     }
 
     await controller.play();
+  });
+
+  previousButton.addEventListener('click', async () => {
+    await playPreviousPlaylistItem();
+  });
+
+  nextButton.addEventListener('click', async () => {
+    await playNextPlaylistItem();
   });
 
   stopButton.addEventListener('click', async () => {
@@ -486,6 +828,7 @@ function mount(): void {
 
   mediaElement.addEventListener('volumechange', () => {
     volumeInput.value = `${Math.round((mediaElement.muted ? 0 : mediaElement.volume) * 100)}`;
+    writeStoredVolumeSettings(mediaElement.volume, mediaElement.muted);
     render(currentState);
   });
 
@@ -502,6 +845,18 @@ function mount(): void {
     controller.pause();
   });
 
+  mediaElement.addEventListener('ended', async () => {
+    if (autoAdvanceInProgress) {
+      return;
+    }
+    autoAdvanceInProgress = true;
+    try {
+      await playNextPlaylistItem();
+    } finally {
+      autoAdvanceInProgress = false;
+    }
+  });
+
   viewerCenterButton.addEventListener('click', async (event) => {
     event.stopPropagation();
     if (!currentState.file || viewerCenterButton.disabled) {
@@ -511,9 +866,64 @@ function mount(): void {
     await controller.play();
   });
 
+  playlistList.addEventListener('click', async (event) => {
+    const target = event.target as HTMLElement;
+    const removeButton = target.closest<HTMLElement>('[data-playlist-remove]');
+    if (removeButton) {
+      await removePlaylistEntry(removeButton.dataset.playlistRemove ?? '');
+      return;
+    }
+
+    const playButton = target.closest<HTMLElement>('[data-playlist-play]');
+    if (playButton) {
+      await playPlaylistItem(playButton.dataset.playlistPlay ?? '', { autoplay: true });
+    }
+  });
+
+  playlistList.addEventListener('dragstart', (event) => {
+    const target = (event.target as HTMLElement).closest<HTMLElement>('[data-playlist-id]');
+    if (!target) {
+      return;
+    }
+    draggedPlaylistItemId = target.dataset.playlistId ?? null;
+    target.classList.add('playlist-item--dragging');
+    event.dataTransfer?.setData('text/plain', draggedPlaylistItemId ?? '');
+    event.dataTransfer!.effectAllowed = 'move';
+  });
+
+  playlistList.addEventListener('dragend', () => {
+    draggedPlaylistItemId = null;
+    playlistList.querySelectorAll('.playlist-item--dragging').forEach((node) => {
+      node.classList.remove('playlist-item--dragging');
+    });
+  });
+
+  playlistList.addEventListener('dragover', (event) => {
+    if (!draggedPlaylistItemId) {
+      return;
+    }
+    event.preventDefault();
+    event.dataTransfer!.dropEffect = 'move';
+  });
+
+  playlistList.addEventListener('drop', (event) => {
+    const target = (event.target as HTMLElement).closest<HTMLElement>('[data-playlist-id]');
+    if (!target || !draggedPlaylistItemId) {
+      return;
+    }
+
+    event.preventDefault();
+    const fromIndex = playlist.findIndex((item) => item.id === draggedPlaylistItemId);
+    const toIndex = playlist.findIndex((item) => item.id === target.dataset.playlistId);
+    playlist = movePlaylistItem(playlist, fromIndex, toIndex);
+    render(currentState);
+  });
+
   window.addEventListener('beforeunload', () => {
     controller.dispose();
   });
+
+  render(currentState);
 }
 
 mount();

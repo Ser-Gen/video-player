@@ -1,6 +1,8 @@
 export type PlaybackMode = 'auto' | 'browser' | 'ffmpeg';
 export type ResolvedEngine = 'browser' | 'ffmpeg';
 export type ProbeStatus = 'idle' | 'running' | 'completed' | 'failed';
+export type PlaylistItemStatus = 'pending' | 'played' | 'current';
+export type RightPanelTab = 'playlist' | 'debug';
 export type PlaybackPhase =
   | 'idle'
   | 'probing'

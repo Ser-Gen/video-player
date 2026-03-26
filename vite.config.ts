@@ -1,6 +1,9 @@
-import { defineConfig } from 'vite';
+import { defineConfig } from 'vitest/config';
+
+const base = process.env.BASE_PATH ?? '/';
 
 export default defineConfig({
+  base,
   build: {
     rollupOptions: {
       output: {

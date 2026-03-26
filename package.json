@@ -6,6 +6,7 @@
   "scripts": {
     "dev": "vite",
     "build": "tsc -b && vite build",
+    "build:subdir": "tsc -b && BASE_PATH=/dist/ vite build",
     "preview": "vite preview",
     "test": "vitest run",
     "test:watch": "vitest"
@@ -20,6 +21,7 @@
   "devDependencies": {
     "@testing-library/dom": "^10.4.0",
     "@testing-library/user-event": "^14.6.1",
+    "@types/node": "^25.5.0",
     "jsdom": "^26.0.0",
     "typescript": "^5.8.2",
     "vite": "^6.2.1",

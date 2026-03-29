@@ -301,6 +301,26 @@ describe('BrowserMediaPlayerController', () => {
     expect(ffmpegService.transcodeCalls).toEqual([]);
   });
 
+  it('allows browser playback for remote audio streams inferred from url suffixes', async () => {
+    const mediaElement = document.createElement('video');
+    const probeElement = document.createElement('video');
+    vi.spyOn(probeElement, 'canPlayType').mockImplementation((mimeType: string) =>
+      mimeType === 'audio/aac' ? 'probably' : '',
+    );
+
+    const controller = new BrowserMediaPlayerController(mediaElement, {
+      ffmpegService: new MockFFmpegService(),
+      probeElement,
+    });
+
+    await controller.openSource(createRemoteUrlSource('https://ice6.somafm.com/groovesalad-64-aac'));
+
+    expect(controller.state.error).toBeNull();
+    expect(controller.state.browserSupported).toBe(true);
+    expect(controller.state.resolvedEngine).toBe('browser');
+    expect(mediaElement.src).toContain('https://ice6.somafm.com/groovesalad-64-aac');
+  });
+
   it('attaches hls.js playback when native hls is unavailable', async () => {
     const mediaElement = document.createElement('video');
     const probeElement = document.createElement('video');

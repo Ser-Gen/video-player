@@ -33,4 +33,8 @@ describe('capability detection', () => {
   it('infers remote url mime type from extension', () => {
     expect(inferMimeType(createRemoteUrlSource('https://example.com/track.mp3'))).toBe('audio/mpeg');
   });
+
+  it('infers remote stream mime type from suffix without file extension', () => {
+    expect(inferMimeType(createRemoteUrlSource('https://ice6.somafm.com/groovesalad-64-aac'))).toBe('audio/aac');
+  });
 });

@@ -164,6 +164,27 @@ function normalizeUrlInput(value: string): string | null {
   }
 }
 
+function normalizeMimeTypeInput(value: string): string | null {
+  const trimmed = value.trim().toLowerCase();
+  if (!trimmed) {
+    return null;
+  }
+
+  return trimmed;
+}
+
+function isSameOriginRemoteSource(source: MediaSourceItem): boolean {
+  if (source.kind === 'local-file') {
+    return true;
+  }
+
+  try {
+    return new URL(source.url, window.location.href).origin === window.location.origin;
+  } catch {
+    return false;
+  }
+}
+
 function mount(): void {
   const app = document.querySelector<HTMLDivElement>('#app');
   if (!app) {
@@ -356,6 +377,10 @@ function mount(): void {
             <span class="stack-label">URL</span>
             <input id="url-dialog-input" class="dialog-input" type="url" placeholder="https://example.com/media.mp4" />
           </label>
+          <label id="url-dialog-mime-field" class="stack-field">
+            <span class="stack-label">MIME type</span>
+            <input id="url-dialog-mime-input" class="dialog-input" type="text" placeholder="Optional, for example audio/aac" />
+          </label>
           <p id="url-dialog-error" class="error-box" hidden></p>
           <div class="dialog-actions">
             <button id="url-dialog-cancel" class="control-button" type="button">Cancel</button>
@@ -424,6 +449,14 @@ function mount(): void {
     'URL dialog description not found',
   );
   const urlDialogInput = requireElement(app.querySelector<HTMLInputElement>('#url-dialog-input'), 'URL dialog input not found');
+  const urlDialogMimeField = requireElement(
+    app.querySelector<HTMLElement>('#url-dialog-mime-field'),
+    'URL dialog mime field not found',
+  );
+  const urlDialogMimeInput = requireElement(
+    app.querySelector<HTMLInputElement>('#url-dialog-mime-input'),
+    'URL dialog mime input not found',
+  );
   const urlDialogError = requireElement(app.querySelector<HTMLElement>('#url-dialog-error'), 'URL dialog error not found');
   const urlDialogCancel = requireElement(app.querySelector<HTMLButtonElement>('#url-dialog-cancel'), 'URL dialog cancel not found');
   const urlDialogSubmit = requireElement(app.querySelector<HTMLButtonElement>('#url-dialog-submit'), 'URL dialog submit not found');
@@ -512,6 +545,10 @@ function mount(): void {
   }
 
   function getVisualizationBlockedMessage(): string {
+    if (currentState.source && !isSameOriginRemoteSource(currentState.source)) {
+      return 'Visualization is unavailable for this remote source because the server does not grant the CORS access required by the Web Audio API.';
+    }
+
     if (!visualizationSupportState.supported) {
       return visualizationSupportState.message;
     }
@@ -525,6 +562,14 @@ function mount(): void {
     }
 
     return 'Visualization is unavailable right now.';
+  }
+
+  function canUseVisualizationForSource(source: MediaSourceItem | null): boolean {
+    if (!source) {
+      return false;
+    }
+
+    return source.kind === 'local-file' || isSameOriginRemoteSource(source);
   }
 
   async function ensurePresetCatalogLoaded(): Promise<void> {
@@ -620,7 +665,7 @@ function mount(): void {
   }
 
   function isVisualizationEnabledForCurrentMedia(state: PlayerState = currentState): boolean {
-    if (!state.source) {
+    if (!state.source || !canUseVisualizationForSource(state.source)) {
       return false;
     }
 
@@ -881,6 +926,10 @@ function mount(): void {
       mediaElement.classList.remove('media-element--hidden');
       stopPresetCycleTimer();
       visualizer.stop();
+      if (state.source && !canUseVisualizationForSource(state.source)) {
+        visualizer.dispose();
+        visualizationSupportState = visualizer.supportState;
+      }
       return;
     }
 
@@ -1006,11 +1055,17 @@ function mount(): void {
       !state.source
         ? 'Open a local file or URL from the File menu.'
         : state.source.kind === 'hls-playlist'
-          ? 'HLS playback is active for this source. Native HLS is used when available, otherwise HLS.js handles playback.'
+          ? canUseVisualizationForSource(state.source)
+            ? 'HLS playback is active for this source. Native HLS is used when available, otherwise HLS.js handles playback.'
+            : 'HLS playback is active for this source. Visualization is disabled because remote audio analysis requires CORS access.'
           : state.source.kind === 'remote-url'
             ? state.browserSupported
-              ? 'This remote URL is using browser playback. FFmpeg fallback is not available for remote sources.'
-              : 'This remote URL is not supported by the browser. Remote FFmpeg fallback is not available in this version.'
+              ? canUseVisualizationForSource(state.source)
+                ? 'This remote URL is using browser playback. FFmpeg fallback is not available for remote sources.'
+                : 'This remote URL is using browser playback. Visualization is disabled because remote audio analysis requires CORS access.'
+              : state.error
+                ? 'This remote URL failed in browser playback. Remote FFmpeg fallback is not available in this version.'
+                : 'Browser MIME detection is inconclusive for this remote URL. Trying direct browser playback without FFmpeg fallback.'
             : state.browserSupported
               ? state.probeStatus === 'running'
                 ? 'Native browser playback is ready. FFmpeg metadata is still being collected in the background.'
@@ -1066,6 +1121,7 @@ function mount(): void {
 
   function resetUrlDialog(): void {
     urlDialogInput.value = '';
+    urlDialogMimeInput.value = '';
     urlDialogError.hidden = true;
     urlDialogError.textContent = '';
   }
@@ -1079,6 +1135,7 @@ function mount(): void {
         ? 'Enter a direct media URL. Browser-playable formats open directly, and HLS playlists use native HLS or HLS.js.'
         : 'Enter a playlist URL (.m3u or .m3u8). Standard M3U entries are imported into the playlist, and HLS manifests are added as a single stream source.';
     urlDialogSubmit.textContent = mode === 'open-url' ? 'Open' : 'Import';
+    urlDialogMimeField.hidden = mode !== 'open-url';
     showDialog(urlDialog);
     queueMicrotask(() => {
       urlDialogInput.focus();
@@ -1470,6 +1527,7 @@ function mount(): void {
   urlDialogForm.addEventListener('submit', async (event) => {
     event.preventDefault();
     const normalizedUrl = normalizeUrlInput(urlDialogInput.value);
+    const normalizedMimeType = normalizeMimeTypeInput(urlDialogMimeInput.value);
     if (!normalizedUrl) {
       showUrlDialogError('Enter a valid absolute URL.');
       return;
@@ -1477,9 +1535,12 @@ function mount(): void {
 
     try {
       if (urlDialogMode === 'open-url') {
-        const source = /\.m3u8(?:$|[?#])/i.test(normalizedUrl)
+        const isHlsUrl = /\.m3u8(?:$|[?#])/i.test(normalizedUrl);
+        const isHlsMimeType =
+          normalizedMimeType === 'application/vnd.apple.mpegurl' || normalizedMimeType === 'application/x-mpegurl';
+        const source = isHlsUrl || isHlsMimeType
           ? createHlsPlaylistSource(normalizedUrl)
-          : createRemoteUrlSource(normalizedUrl);
+          : createRemoteUrlSource(normalizedUrl, undefined, normalizedMimeType);
         addSourcesToPlaylist([source], {
           autoplayFirst: true,
           showPlaylist: true,

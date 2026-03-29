@@ -1,4 +1,4 @@
-import { detectCapability } from './capability';
+import { detectCapability, inferMimeType } from './capability';
 import { FFmpegService } from './ffmpegService';
 import { defaultHlsClientFactory, HLS_ERROR_EVENT, HLS_MEDIA_ATTACHED_EVENT, type HlsClient, type HlsClientFactory } from './hlsPlayback';
 import { createLocalFileSource, getSourceName, isLocalFileSource } from './sourceUtils';
@@ -118,6 +118,7 @@ export class BrowserMediaPlayerController implements PlayerController {
     this.shouldAutoplayWhenReady = false;
     const requestProbeId = ++this.probeToken;
     const capability = detectCapability(source, this.probeElement);
+    const canAttemptBrowserPlayback = this.canAttemptBrowserPlayback(source, capability.browserSupported);
     this.pauseMediaElement('openSource:reset-before-load');
     this.mediaElement.removeAttribute('src');
     this.mediaElement.load();
@@ -131,13 +132,13 @@ export class BrowserMediaPlayerController implements PlayerController {
       browserSupported: capability.browserSupported,
       status:
         resolvedEngine === 'browser'
-          ? capability.browserSupported || source.kind === 'hls-playlist'
+          ? canAttemptBrowserPlayback
             ? 'paused'
             : 'error'
           : 'probing',
       playbackPhase:
         resolvedEngine === 'browser'
-          ? capability.browserSupported || source.kind === 'hls-playlist'
+          ? canAttemptBrowserPlayback
             ? 'ready'
             : 'failed'
           : 'probing',
@@ -152,7 +153,7 @@ export class BrowserMediaPlayerController implements PlayerController {
       `browserSupported=${capability.browserSupported}; audioOnly=${capability.isAudioOnly}; kind=${source.kind}`,
     );
 
-    if (!isLocalFileSource(source) && source.kind !== 'hls-playlist' && !capability.browserSupported) {
+    if (!isLocalFileSource(source) && source.kind !== 'hls-playlist' && !canAttemptBrowserPlayback) {
       this.applyPlaybackError(
         'remote_unsupported',
         'This remote URL is not supported by the browser. Remote FFmpeg fallback is not available in this version.',
@@ -351,7 +352,7 @@ export class BrowserMediaPlayerController implements PlayerController {
     if (resolvedEngine === 'browser') {
       if (this.state.source.kind === 'hls-playlist') {
         await this.loadHlsSource(this.state.source, timeSec);
-      } else if (this.state.browserSupported) {
+      } else if (this.canAttemptBrowserPlayback(this.state.source, this.state.browserSupported ?? false)) {
         this.loadBrowserSource(this.state.source, timeSec);
       } else {
         this.applyPlaybackError(
@@ -744,6 +745,18 @@ export class BrowserMediaPlayerController implements PlayerController {
     return resolvePlaybackEngine(this.state.playbackMode, browserSupported);
   }
 
+  private canAttemptBrowserPlayback(source: MediaSourceItem, browserSupported: boolean): boolean {
+    if (source.kind === 'hls-playlist') {
+      return true;
+    }
+
+    if (browserSupported) {
+      return true;
+    }
+
+    return !isLocalFileSource(source) && inferMimeType(source) === 'application/octet-stream';
+  }
+
   private destroyHlsClient(): void {
     if (!this.hlsClient) {
       return;
@@ -1015,6 +1028,22 @@ export class BrowserMediaPlayerController implements PlayerController {
         ...prev,
         status: 'paused',
         playbackPhase: 'ready',
+      }));
+    }
+
+    if (event.type === 'error') {
+      const currentSource = this.state.source;
+      const message =
+        currentSource?.kind === 'remote-url'
+          ? 'The browser could not play this remote URL.'
+          : 'The browser could not play this source.';
+      const code: PlaybackErrorCode = currentSource?.kind === 'remote-url' ? 'remote_unsupported' : 'attach_failed';
+      this.setState((prev) => ({
+        ...prev,
+        status: 'error',
+        playbackPhase: 'failed',
+        error: message,
+        lastPlaybackError: { code, message },
       }));
     }
   };

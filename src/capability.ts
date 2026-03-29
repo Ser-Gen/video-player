@@ -24,12 +24,27 @@ const MIME_BY_EXTENSION: Record<string, string> = {
   m3u: 'audio/x-mpegurl',
 };
 
+const MIME_BY_SUFFIX: Array<[suffix: string, mimeType: string]> = [
+  ['-aac', 'audio/aac'],
+  ['-aacp', 'audio/aac'],
+  ['-mp3', 'audio/mpeg'],
+  ['-ogg', 'audio/ogg'],
+  ['-opus', 'audio/ogg'],
+];
+
 export function inferMimeTypeFromName(name: string, declaredMimeType?: string | null): string {
   if (declaredMimeType) {
     return declaredMimeType;
   }
 
-  const extension = name.split('.').pop()?.toLowerCase() ?? '';
+  const normalizedName = name.toLowerCase();
+  const extension = normalizedName.split('.').pop()?.toLowerCase() ?? '';
+  const suffixMatch = MIME_BY_SUFFIX.find(([suffix]) => normalizedName.endsWith(suffix));
+
+  if (suffixMatch) {
+    return suffixMatch[1];
+  }
+
   return MIME_BY_EXTENSION[extension] ?? 'application/octet-stream';
 }
 

@@ -266,6 +266,59 @@ describe('main ui', () => {
     });
   });
 
+  it('shows mime type input only for open url mode and uses it for stream urls', async () => {
+    vi.spyOn(HTMLMediaElement.prototype, 'canPlayType').mockImplementation((mimeType: string) =>
+      mimeType === 'audio/aac' ? 'probably' : '',
+    );
+
+    await loadMain();
+
+    await userEvent.click(document.querySelector<HTMLButtonElement>('#file-menu-button')!);
+    await userEvent.click(document.querySelector<HTMLButtonElement>('#open-url-button')!);
+
+    expect(document.querySelector<HTMLElement>('#url-dialog-mime-field')?.hidden).toBe(false);
+
+    await userEvent.type(
+      document.querySelector<HTMLInputElement>('#url-dialog-input')!,
+      'https://ice6.somafm.com/groovesalad-64-aac',
+    );
+    await userEvent.type(document.querySelector<HTMLInputElement>('#url-dialog-mime-input')!, 'audio/aac');
+    await userEvent.click(document.querySelector<HTMLButtonElement>('#url-dialog-submit')!);
+
+    await waitFor(() => {
+      expect(document.querySelector<HTMLElement>('#header-file-name')?.textContent).toContain('groovesalad-64-aac');
+      expect(document.querySelector<HTMLElement>('#error-box')?.textContent ?? '').toBe('');
+    });
+
+    await userEvent.click(document.querySelector<HTMLButtonElement>('#file-menu-button')!);
+    await userEvent.click(document.querySelector<HTMLButtonElement>('#import-playlist-url-button')!);
+
+    expect(document.querySelector<HTMLElement>('#url-dialog-mime-field')?.hidden).toBe(true);
+  });
+
+  it('keeps visualization disabled for cross-origin remote audio streams without CORS-safe analysis', async () => {
+    vi.spyOn(HTMLMediaElement.prototype, 'canPlayType').mockImplementation((mimeType: string) =>
+      mimeType === 'audio/aac' ? 'probably' : '',
+    );
+
+    await loadMain();
+
+    await userEvent.click(document.querySelector<HTMLButtonElement>('#file-menu-button')!);
+    await userEvent.click(document.querySelector<HTMLButtonElement>('#open-url-button')!);
+    await userEvent.type(
+      document.querySelector<HTMLInputElement>('#url-dialog-input')!,
+      'https://ice6.somafm.com/groovesalad-64-aac',
+    );
+    await userEvent.type(document.querySelector<HTMLInputElement>('#url-dialog-mime-input')!, 'audio/aac');
+    await userEvent.click(document.querySelector<HTMLButtonElement>('#url-dialog-submit')!);
+
+    await waitFor(() => {
+      expect(document.querySelector<HTMLCanvasElement>('#visualization-canvas')?.hidden).toBe(true);
+      expect(document.querySelector<HTMLVideoElement>('#media-element')?.classList.contains('media-element--hidden')).toBe(false);
+      expect(document.querySelector<HTMLElement>('#support-hint')?.textContent).toContain('Visualization is disabled');
+    });
+  });
+
   it('imports playlist entries from a playlist url', async () => {
     vi.mocked(fetch).mockResolvedValue(
       new Response('#EXTM3U\n#EXTINF:-1,Remote Clip\nhttps://cdn.example.com/clip.mp4', { status: 200 }),

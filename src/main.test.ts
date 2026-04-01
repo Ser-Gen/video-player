@@ -165,6 +165,56 @@ describe('main ui', () => {
     expect(playbackRateSelect!.value).toBe('1.5');
   });
 
+  it('supports keyboard shortcuts for play pause seek and volume', async () => {
+    await loadMain();
+
+    const mediaElement = document.querySelector<HTMLVideoElement>('#media-element')!;
+    const playSpy = vi.spyOn(mediaElement, 'play').mockResolvedValue();
+    const pauseSpy = vi.spyOn(mediaElement, 'pause');
+
+    await userEvent.click(document.querySelector<HTMLButtonElement>('#file-menu-button')!);
+    await userEvent.click(document.querySelector<HTMLButtonElement>('#open-url-button')!);
+    await userEvent.type(document.querySelector<HTMLInputElement>('#url-dialog-input')!, 'https://example.com/video.mp4');
+    await userEvent.click(document.querySelector<HTMLButtonElement>('#url-dialog-submit')!);
+    playSpy.mockClear();
+    pauseSpy.mockClear();
+
+    window.dispatchEvent(new KeyboardEvent('keydown', { key: ' ', bubbles: true }));
+    await waitFor(() => {
+      expect(pauseSpy).toHaveBeenCalled();
+    });
+
+    Object.defineProperty(mediaElement, 'paused', {
+      configurable: true,
+      get: () => true,
+    });
+
+    window.dispatchEvent(new KeyboardEvent('keydown', { key: 'k', bubbles: true }));
+    await waitFor(() => {
+      expect(playSpy).toHaveBeenCalled();
+    });
+
+    mediaElement.currentTime = 30;
+    mediaElement.dispatchEvent(new Event('timeupdate'));
+    window.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowLeft', bubbles: true }));
+    await waitFor(() => {
+      expect(mediaElement.currentTime).toBe(20);
+    });
+
+    window.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowRight', bubbles: true }));
+    await waitFor(() => {
+      expect(mediaElement.currentTime).toBe(30);
+    });
+
+    mediaElement.volume = 0.5;
+    mediaElement.muted = false;
+    window.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowUp', bubbles: true }));
+    expect(mediaElement.volume).toBeCloseTo(0.6);
+
+    window.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowDown', bubbles: true }));
+    expect(mediaElement.volume).toBeCloseTo(0.5);
+  });
+
   it('restores visualization settings on mount', async () => {
     localStorage.setItem(
       'video-player:visualization-settings',
@@ -505,6 +555,40 @@ describe('main ui', () => {
       expect(document.querySelector<HTMLElement>('#playlist-list')?.textContent).toBe('');
       expect(document.querySelector<HTMLElement>('#playlist-empty')?.hidden).toBe(false);
       expect(document.querySelector<HTMLElement>('#header-file-name')?.textContent).toContain('No source loaded');
+    });
+  });
+
+  it('cycles through the playlist with alt plus arrow up and down', async () => {
+    await loadMain();
+
+    await userEvent.click(document.querySelector<HTMLButtonElement>('#file-menu-button')!);
+    await userEvent.click(document.querySelector<HTMLButtonElement>('#open-url-button')!);
+    await userEvent.type(document.querySelector<HTMLInputElement>('#url-dialog-input')!, 'https://example.com/first.mp4');
+    await userEvent.click(document.querySelector<HTMLButtonElement>('#url-dialog-submit')!);
+
+    await userEvent.click(document.querySelector<HTMLButtonElement>('#file-menu-button')!);
+    await userEvent.click(document.querySelector<HTMLButtonElement>('#open-url-button')!);
+    await userEvent.type(document.querySelector<HTMLInputElement>('#url-dialog-input')!, 'https://example.com/second.mp4');
+    await userEvent.click(document.querySelector<HTMLButtonElement>('#url-dialog-submit')!);
+
+    await waitFor(() => {
+      expect(document.querySelector<HTMLElement>('#header-file-name')?.textContent).toContain('second.mp4');
+      expect(document.querySelector<HTMLElement>('#playlist-list')?.textContent).toContain('first.mp4');
+    });
+
+    window.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowDown', altKey: true, bubbles: true }));
+    await waitFor(() => {
+      expect(document.querySelector<HTMLElement>('#header-file-name')?.textContent).toContain('first.mp4');
+    });
+
+    window.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowDown', altKey: true, bubbles: true }));
+    await waitFor(() => {
+      expect(document.querySelector<HTMLElement>('#header-file-name')?.textContent).toContain('second.mp4');
+    });
+
+    window.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowUp', altKey: true, bubbles: true }));
+    await waitFor(() => {
+      expect(document.querySelector<HTMLElement>('#header-file-name')?.textContent).toContain('first.mp4');
     });
   });
 });

@@ -23,6 +23,59 @@ Browser media player that supports local files, direct remote URLs, and HLS play
 
 This gives a practical browser-only fallback path, but it is still constrained by browser CPU, memory, and `ffmpeg.wasm` startup cost.
 
+## URL API
+
+The player can preload the playlist from the page URL via the `initPlaylist` query parameter.
+
+Supported shape:
+
+```json
+[
+  {
+    "url": "https://cdn.example.com/stream.mp3",
+    "name": "Startup Stream"
+  },
+  {
+    "url": "https://cdn.example.com/live",
+    "name": "Live HLS",
+    "mimeType": "application/vnd.apple.mpegurl"
+  }
+]
+```
+
+Rules:
+
+- `initPlaylist` must be a JSON-encoded array
+- each item must be an object with required `url`
+- `url` must be an absolute URL
+- `name` is optional and overrides the derived display name
+- `mimeType` is optional and can help the player recognize streams without file extensions
+- `.m3u8` URLs or entries with HLS MIME are treated as HLS playlist sources
+- valid items are added to Playlist on startup
+- startup import does not auto-open or autoplay the first item
+- invalid items are skipped and reported in the sidebar/debug message area
+
+Example:
+
+```text
+http://localhost:5173/?initPlaylist=%5B%7B%22url%22%3A%22https%3A%2F%2Fcdn.example.com%2Fstream.mp3%22%2C%22name%22%3A%22Startup%20Stream%22%7D%2C%7B%22url%22%3A%22https%3A%2F%2Fcdn.example.com%2Flive%22%2C%22name%22%3A%22Live%20HLS%22%2C%22mimeType%22%3A%22application%2Fvnd.apple.mpegurl%22%7D%5D
+```
+
+The decoded `initPlaylist` value in that example is the JSON array shown above.
+
+## Keyboard Shortcuts
+
+- `Space` or `K`: play / pause
+- `ArrowLeft` or `J`: seek backward by `10` seconds
+- `ArrowRight` or `L`: seek forward by `10` seconds
+- `ArrowUp`: volume `+10%`
+- `ArrowDown`: volume `-10%`
+- `M`: mute / unmute
+- `Alt + ArrowUp`: previous playlist item
+- `Alt + ArrowDown`: next playlist item
+
+Playlist navigation with `Alt + ArrowUp` / `Alt + ArrowDown` is cyclical: after the last item, the first item starts; before the first item, the last item starts.
+
 ## Development
 
 ```bash

@@ -36,6 +36,8 @@ const PLAYBACK_RATE_OPTIONS = [
   { value: '1.5', label: '1.5x' },
   { value: '2', label: '2x' },
 ] as const;
+const SEEK_SHORTCUT_STEP_SEC = 10;
+const VOLUME_SHORTCUT_STEP = 0.1;
 
 function requireElement<T extends Element>(value: T | null, message: string): T {
   if (!value) {
@@ -217,6 +219,14 @@ function isSameOriginRemoteSource(source: MediaSourceItem): boolean {
   } catch {
     return false;
   }
+}
+
+function isEditableKeyboardTarget(target: EventTarget | null): boolean {
+  if (!(target instanceof HTMLElement)) {
+    return false;
+  }
+
+  return Boolean(target.closest('input, textarea, select, [contenteditable="true"]'));
 }
 
 function normalizeInitPlaylistEntry(value: unknown): InitPlaylistEntry | null {
@@ -1576,6 +1586,58 @@ function mount(): void {
     });
   }
 
+  async function playNextPlaylistItemCycled(): Promise<void> {
+    if (playlist.length === 0) {
+      return;
+    }
+
+    const currentItem = getCurrentPlaylistItem();
+    if (!currentItem) {
+      await playPlaylistItem(playlist[0].id, { autoplay: true });
+      return;
+    }
+
+    const currentIndex = playlist.findIndex((item) => item.id === currentItem.id);
+    if (currentIndex < 0) {
+      await playPlaylistItem(playlist[0].id, { autoplay: true });
+      return;
+    }
+
+    const nextIndex = (currentIndex + 1) % playlist.length;
+    await playPlaylistItem(playlist[nextIndex].id, { autoplay: true });
+  }
+
+  async function playPreviousPlaylistItemCycled(): Promise<void> {
+    if (playlist.length === 0) {
+      return;
+    }
+
+    const currentItem = getCurrentPlaylistItem();
+    if (!currentItem) {
+      await playPlaylistItem(playlist[playlist.length - 1].id, { autoplay: true });
+      return;
+    }
+
+    const currentIndex = playlist.findIndex((item) => item.id === currentItem.id);
+    if (currentIndex < 0) {
+      await playPlaylistItem(playlist[playlist.length - 1].id, { autoplay: true });
+      return;
+    }
+
+    const previousIndex = (currentIndex - 1 + playlist.length) % playlist.length;
+    await playPlaylistItem(playlist[previousIndex].id, {
+      autoplay: true,
+      markPreviousAsPlayed: false,
+    });
+  }
+
+  function adjustVolume(delta: number): void {
+    const nextVolume = Math.min(1, Math.max(0, (mediaElement.muted ? 0 : mediaElement.volume) + delta));
+    mediaElement.volume = nextVolume;
+    mediaElement.muted = nextVolume === 0;
+    render(currentState);
+  }
+
   function updateHoverFromPointer(clientX: number): void {
     const rect = timeline.getBoundingClientRect();
     hoverRatio = timelineRatioFromClientX(clientX, rect.left, rect.width);
@@ -1965,6 +2027,77 @@ function mount(): void {
     volumeInput.value = `${Math.round((mediaElement.muted ? 0 : mediaElement.volume) * 100)}`;
     writeStoredVolumeSettings(mediaElement.volume, mediaElement.muted);
     render(currentState);
+  });
+
+  window.addEventListener('keydown', async (event) => {
+    if (event.defaultPrevented || event.repeat) {
+      return;
+    }
+
+    if (document.querySelector('dialog[open]')) {
+      return;
+    }
+
+    if (isEditableKeyboardTarget(event.target)) {
+      return;
+    }
+
+    if (event.altKey && event.key === 'ArrowUp') {
+      event.preventDefault();
+      await playPreviousPlaylistItemCycled();
+      return;
+    }
+
+    if (event.altKey && event.key === 'ArrowDown') {
+      event.preventDefault();
+      await playNextPlaylistItemCycled();
+      return;
+    }
+
+    if ((event.key === ' ' || event.key.toLowerCase() === 'k') && !event.metaKey && !event.ctrlKey && !event.altKey) {
+      event.preventDefault();
+      if (currentState.status === 'playing') {
+        controller.pause();
+      } else {
+        await controller.play();
+      }
+      return;
+    }
+
+    if ((event.key === 'ArrowLeft' || event.key.toLowerCase() === 'j') && !event.metaKey && !event.ctrlKey && !event.altKey) {
+      event.preventDefault();
+      if (currentState.source) {
+        await controller.seek(Math.max(0, currentState.currentTimeSec - SEEK_SHORTCUT_STEP_SEC));
+      }
+      return;
+    }
+
+    if ((event.key === 'ArrowRight' || event.key.toLowerCase() === 'l') && !event.metaKey && !event.ctrlKey && !event.altKey) {
+      event.preventDefault();
+      if (currentState.source) {
+        const durationSec = currentState.durationSec ?? Number.POSITIVE_INFINITY;
+        await controller.seek(Math.min(durationSec, currentState.currentTimeSec + SEEK_SHORTCUT_STEP_SEC));
+      }
+      return;
+    }
+
+    if (event.key === 'ArrowUp' && !event.metaKey && !event.ctrlKey && !event.altKey) {
+      event.preventDefault();
+      adjustVolume(VOLUME_SHORTCUT_STEP);
+      return;
+    }
+
+    if (event.key === 'ArrowDown' && !event.metaKey && !event.ctrlKey && !event.altKey) {
+      event.preventDefault();
+      adjustVolume(-VOLUME_SHORTCUT_STEP);
+      return;
+    }
+
+    if (event.key.toLowerCase() === 'm' && !event.metaKey && !event.ctrlKey && !event.altKey) {
+      event.preventDefault();
+      mediaElement.muted = !mediaElement.muted;
+      render(currentState);
+    }
   });
 
   mediaElement.addEventListener('click', async () => {

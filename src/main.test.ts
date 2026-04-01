@@ -315,6 +315,36 @@ describe('main ui', () => {
     });
   });
 
+  it('shows buffered media progress on the timeline', async () => {
+    await loadMain();
+
+    const videoInput = document.querySelector<HTMLInputElement>('#open-file-input')!;
+    const mediaElement = document.querySelector<HTMLVideoElement>('#media-element')!;
+    const timelineBuffered = document.querySelector<HTMLDivElement>('#timeline-buffered')!;
+
+    await userEvent.upload(videoInput, new File(['123456'], 'clip.mp4', { type: 'video/mp4' }));
+
+    Object.defineProperty(mediaElement, 'duration', {
+      configurable: true,
+      get: () => 120,
+    });
+    Object.defineProperty(mediaElement, 'buffered', {
+      configurable: true,
+      get: () => ({
+        length: 1,
+        start: () => 0,
+        end: () => 60,
+      }),
+    });
+
+    mediaElement.dispatchEvent(new Event('loadedmetadata'));
+    mediaElement.dispatchEvent(new Event('progress'));
+
+    await waitFor(() => {
+      expect(timelineBuffered.style.width).toBe('50%');
+    });
+  });
+
   it('toggles playback when the visualization canvas is clicked', async () => {
     await loadMain();
 

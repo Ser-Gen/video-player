@@ -336,9 +336,19 @@ select:focus-visible,
   cursor: pointer;
 }
 
+.timeline-buffered,
 .timeline-progress {
+  position: absolute;
+  inset: 0 auto 0 0;
   height: 100%;
   width: 0;
+}
+
+.timeline-buffered {
+  background: rgba(255, 122, 26, 0.25);
+}
+
+.timeline-progress {
   background: var(--accent);
 }
 

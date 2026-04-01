@@ -229,6 +229,23 @@ function isEditableKeyboardTarget(target: EventTarget | null): boolean {
   return Boolean(target.closest('input, textarea, select, [contenteditable="true"]'));
 }
 
+function getBufferedEndSec(mediaElement: HTMLMediaElement, currentTimeSec: number): number | null {
+  const { buffered } = mediaElement;
+  if (!buffered || buffered.length === 0) {
+    return null;
+  }
+
+  for (let index = 0; index < buffered.length; index += 1) {
+    const start = buffered.start(index);
+    const end = buffered.end(index);
+    if (currentTimeSec >= start && currentTimeSec <= end) {
+      return end;
+    }
+  }
+
+  return buffered.end(buffered.length - 1);
+}
+
 function normalizeInitPlaylistEntry(value: unknown): InitPlaylistEntry | null {
   if (!value || typeof value !== 'object' || Array.isArray(value)) {
     return null;
@@ -390,6 +407,7 @@ function mount(): void {
               <div class="control-strip">
                 <div class="timeline-wrap">
                   <div id="timeline" class="timeline" role="slider" aria-label="Seek timeline" tabindex="0">
+                    <div id="timeline-buffered" class="timeline-buffered"></div>
                     <div id="timeline-progress" class="timeline-progress"></div>
                     <div id="timeline-hover-marker" class="timeline-hover-marker" hidden></div>
                     <div id="timeline-tooltip" class="timeline-tooltip" hidden>00:00</div>
@@ -629,6 +647,7 @@ function mount(): void {
   const volumeInput = requireElement(app.querySelector<HTMLInputElement>('#volume-input'), 'Volume input not found');
   const modeSelect = requireElement(app.querySelector<HTMLSelectElement>('#mode-select'), 'Mode select not found');
   const timeline = requireElement(app.querySelector<HTMLDivElement>('#timeline'), 'Timeline not found');
+  const timelineBuffered = requireElement(app.querySelector<HTMLDivElement>('#timeline-buffered'), 'Timeline buffered not found');
   const timelineProgress = requireElement(app.querySelector<HTMLDivElement>('#timeline-progress'), 'Timeline progress not found');
   const timelineHoverMarker = requireElement(app.querySelector<HTMLDivElement>('#timeline-hover-marker'), 'Timeline hover marker not found');
   const timelineTooltip = requireElement(app.querySelector<HTMLDivElement>('#timeline-tooltip'), 'Timeline tooltip not found');
@@ -1054,6 +1073,12 @@ function mount(): void {
   function renderTimeline(state: PlayerState): void {
     const durationSec = state.durationSec ?? 0;
     const playedRatio = durationSec > 0 ? Math.min(1, state.currentTimeSec / durationSec) : 0;
+    const bufferedEndSec = durationSec > 0 ? getBufferedEndSec(mediaElement, state.currentTimeSec) : null;
+    const bufferedRatio =
+      durationSec > 0 && bufferedEndSec !== null
+        ? Math.min(1, bufferedEndSec / durationSec)
+        : 0;
+    timelineBuffered.style.width = `${bufferedRatio * 100}%`;
     timelineProgress.style.width = `${playedRatio * 100}%`;
     transportTime.textContent = `${formatTime(state.currentTimeSec)} / ${formatTime(state.durationSec)}`;
 
@@ -2027,6 +2052,10 @@ function mount(): void {
     volumeInput.value = `${Math.round((mediaElement.muted ? 0 : mediaElement.volume) * 100)}`;
     writeStoredVolumeSettings(mediaElement.volume, mediaElement.muted);
     render(currentState);
+  });
+
+  mediaElement.addEventListener('progress', () => {
+    renderTimeline(currentState);
   });
 
   window.addEventListener('keydown', async (event) => {

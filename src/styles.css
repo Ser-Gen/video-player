@@ -123,7 +123,9 @@ select:focus-visible,
   position: absolute;
   top: calc(100% + 1px);
   left: 0;
-  min-width: 160px;
+  min-width: 100%;
+  width: max-content;
+  max-width: min(400px, calc(100vw - 32px));
   display: grid;
   border: 1px solid var(--border);
   background: var(--bg-panel);
@@ -135,6 +137,7 @@ select:focus-visible,
   border-bottom: 1px solid var(--border);
   text-align: left;
   background: transparent;
+  width: 100%;
 }
 
 .menu-action:last-child {
@@ -146,9 +149,19 @@ select:focus-visible,
   color: var(--text-dim);
 }
 
+.menu-action--title {
+  font-weight: 600;
+}
+
 .menu-action--submenu::after {
   content: "›";
   float: right;
+  color: var(--text-dim);
+}
+
+.menu-action--submenu-back::before {
+  content: "‹";
+  margin-right: 8px;
   color: var(--text-dim);
 }
 
@@ -165,9 +178,6 @@ select:focus-visible,
 .menu-dropdown--submenu {
   top: -1px;
   left: calc(100% - 1px);
-}
-
-.menu-dropdown--nested {
   max-height: min(70vh, 480px);
   overflow: auto;
 }

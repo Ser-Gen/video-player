@@ -775,6 +775,9 @@ function mount(): void {
     const nestedCategoryId = activeViewSubmenu?.startsWith('preset-category:')
       ? activeViewSubmenu.slice('preset-category:'.length)
       : null;
+    const activeCategory = nestedCategoryId
+      ? presetCategories.find((category) => category.id === nestedCategoryId) ?? null
+      : null;
 
     if (presetCatalogStatus === 'loading') {
       presetMenu.innerHTML = `<div class="menu-action menu-action--static">Loading presets…</div>`;
@@ -788,35 +791,38 @@ function mount(): void {
       return;
     }
 
-    presetMenu.innerHTML = presetCategories
-      .map((category) => {
-        const submenuVisible = nestedCategoryId === category.id;
-        return `
-          <div class="menu-submenu-wrap menu-submenu-wrap--nested">
+    if (activeCategory) {
+      presetMenu.innerHTML = `
+        <button class="menu-action menu-action--submenu-back" type="button" data-preset-back="true">Back</button>
+        <div class="menu-action menu-action--static menu-action--title">${escapeHtml(activeCategory.label)}</div>
+        ${activeCategory.presets
+          .map(
+            (preset) => `
+              <button
+                class="menu-action"
+                type="button"
+                data-preset-id="${escapeHtml(preset.id)}"
+              >${escapeHtml(preset.label)}${selectedPreset?.id === preset.id ? ' ✓' : ''}</button>
+            `,
+          )
+          .join('')}
+      `;
+    } else {
+      presetMenu.innerHTML = presetCategories
+        .map(
+          (category) => `
             <button
               class="menu-action menu-action--submenu"
               type="button"
               data-preset-category="${escapeHtml(category.id)}"
               aria-haspopup="true"
-              aria-expanded="${submenuVisible ? 'true' : 'false'}"
+              aria-expanded="false"
             >${escapeHtml(category.label)}</button>
-            <div class="menu-dropdown menu-dropdown--submenu menu-dropdown--nested" ${submenuVisible ? '' : 'hidden'}>
-              ${category.presets
-                .map(
-                  (preset) => `
-                    <button
-                      class="menu-action"
-                      type="button"
-                      data-preset-id="${escapeHtml(preset.id)}"
-                    >${escapeHtml(preset.label)}${selectedPreset?.id === preset.id ? ' ✓' : ''}</button>
-                  `,
-                )
-                .join('')}
-            </div>
-          </div>
-        `;
-      })
-      .join('');
+          `,
+        )
+        .join('');
+    }
+
     presetMenu.hidden = activeMenu !== 'view' || (activeViewSubmenu !== 'preset' && !activeViewSubmenu?.startsWith('preset-category:'));
   }
 
@@ -1610,11 +1616,18 @@ function mount(): void {
     }
 
     const target = event.target as HTMLElement;
+    const backButton = target.closest<HTMLElement>('[data-preset-back]');
+    if (backButton) {
+      setViewSubmenu('preset');
+      renderVisualizationMenu();
+      return;
+    }
+
     const categoryButton = target.closest<HTMLElement>('[data-preset-category]');
     if (categoryButton) {
       const categoryId = categoryButton.dataset.presetCategory ?? '';
       const nextSubmenu = categorySubmenuId(categoryId);
-      setViewSubmenu(activeViewSubmenu === nextSubmenu ? 'preset' : nextSubmenu);
+      setViewSubmenu(nextSubmenu);
       renderVisualizationMenu();
       return;
     }

@@ -29,6 +29,13 @@ const CYCLE_INTERVAL_OPTIONS: Array<{ value: PresetCycleIntervalSec; label: stri
   { value: 120, label: '2 min' },
   { value: 300, label: '5 min' },
 ];
+const PLAYBACK_RATE_OPTIONS = [
+  { value: '0.5', label: '0.5x' },
+  { value: '1', label: '1x' },
+  { value: '1.25', label: '1.25x' },
+  { value: '1.5', label: '1.5x' },
+  { value: '2', label: '2x' },
+] as const;
 
 function requireElement<T extends Element>(value: T | null, message: string): T {
   if (!value) {
@@ -145,6 +152,27 @@ function normalizeVisualizationSettings(
 
 function intervalLabel(interval: PresetCycleIntervalSec): string {
   return CYCLE_INTERVAL_OPTIONS.find((option) => option.value === interval)?.label ?? '1 min';
+}
+
+function formatFileSize(bytes: number | null): string {
+  if (bytes === null || !Number.isFinite(bytes) || bytes < 0) {
+    return '-';
+  }
+
+  if (bytes < 1024) {
+    return `${bytes} B`;
+  }
+
+  const units = ['KB', 'MB', 'GB', 'TB'];
+  let value = bytes / 1024;
+  let unitIndex = 0;
+
+  while (value >= 1024 && unitIndex < units.length - 1) {
+    value /= 1024;
+    unitIndex += 1;
+  }
+
+  return `${value.toFixed(value >= 10 ? 0 : 1)} ${units[unitIndex]}`;
 }
 
 function categorySubmenuId(categoryId: string): ViewSubmenu {
@@ -274,6 +302,12 @@ function mount(): void {
                   <button id="stop-button" class="control-button icon-button" type="button" aria-label="Stop">
                     <span aria-hidden="true">■</span>
                   </button>
+                  <label class="playback-rate-wrap" aria-label="Playback speed">
+                    <span class="playback-rate-label">Speed</span>
+                    <select id="playback-rate-select" class="playback-rate-select">
+                      ${PLAYBACK_RATE_OPTIONS.map((option) => `<option value="${option.value}">${option.label}</option>`).join('')}
+                    </select>
+                  </label>
                 </div>
 
                 <div class="control-group control-group-center">
@@ -302,6 +336,10 @@ function mount(): void {
           <section id="playlist-panel" class="sidebar-panel" hidden>
             <div class="section-head">
               <h2>Playlist</h2>
+              <div class="section-actions">
+                <button id="playlist-save-button" class="copy-button" type="button">Save</button>
+                <button id="playlist-clear-button" class="copy-button" type="button">Clear</button>
+              </div>
             </div>
             <div id="playlist-empty" class="sidebar-note">Playlist is empty.</div>
             <div id="playlist-list" class="playlist-list"></div>
@@ -388,6 +426,17 @@ function mount(): void {
           </div>
         </form>
       </dialog>
+
+      <dialog id="playlist-clear-dialog" class="about-dialog">
+        <form class="about-dialog-form">
+          <h2>Clear Playlist</h2>
+          <p id="playlist-clear-message">Are you sure you want to clear the playlist?</p>
+          <div class="dialog-actions">
+            <button id="playlist-clear-cancel" class="control-button" type="button">Cancel</button>
+            <button id="playlist-clear-confirm" class="control-button accent" type="button">Clear</button>
+          </div>
+        </form>
+      </dialog>
     </main>
   `;
 
@@ -465,6 +514,10 @@ function mount(): void {
   const playToggleIcon = requireElement(app.querySelector<HTMLElement>('#play-toggle-icon'), 'Play toggle icon not found');
   const nextButton = requireElement(app.querySelector<HTMLButtonElement>('#next-button'), 'Next button not found');
   const stopButton = requireElement(app.querySelector<HTMLButtonElement>('#stop-button'), 'Stop button not found');
+  const playbackRateSelect = requireElement(
+    app.querySelector<HTMLSelectElement>('#playback-rate-select'),
+    'Playback rate select not found',
+  );
   const muteButton = requireElement(app.querySelector<HTMLButtonElement>('#mute-button'), 'Mute button not found');
   const muteIcon = requireElement(app.querySelector<HTMLElement>('#mute-icon'), 'Mute icon not found');
   const volumeInput = requireElement(app.querySelector<HTMLInputElement>('#volume-input'), 'Volume input not found');
@@ -483,6 +536,30 @@ function mount(): void {
   const debugPanel = requireElement(app.querySelector<HTMLElement>('#debug-panel'), 'Debug panel not found');
   const playlistEmpty = requireElement(app.querySelector<HTMLElement>('#playlist-empty'), 'Playlist empty state not found');
   const playlistList = requireElement(app.querySelector<HTMLDivElement>('#playlist-list'), 'Playlist list not found');
+  const playlistSaveButton = requireElement(
+    app.querySelector<HTMLButtonElement>('#playlist-save-button'),
+    'Playlist save button not found',
+  );
+  const playlistClearButton = requireElement(
+    app.querySelector<HTMLButtonElement>('#playlist-clear-button'),
+    'Playlist clear button not found',
+  );
+  const playlistClearDialog = requireElement(
+    app.querySelector<HTMLDialogElement>('#playlist-clear-dialog'),
+    'Playlist clear dialog not found',
+  );
+  const playlistClearMessage = requireElement(
+    app.querySelector<HTMLElement>('#playlist-clear-message'),
+    'Playlist clear message not found',
+  );
+  const playlistClearConfirm = requireElement(
+    app.querySelector<HTMLButtonElement>('#playlist-clear-confirm'),
+    'Playlist clear confirm button not found',
+  );
+  const playlistClearCancel = requireElement(
+    app.querySelector<HTMLButtonElement>('#playlist-clear-cancel'),
+    'Playlist clear cancel button not found',
+  );
   const sessionGrid = requireElement(app.querySelector<HTMLDivElement>('#session-grid'), 'Session grid not found');
   const mediaInfo = requireElement(app.querySelector<HTMLDListElement>('#media-info'), 'Media info not found');
   const diagSummary = requireElement(app.querySelector<HTMLDivElement>('#diag-summary'), 'Diag summary not found');
@@ -518,11 +595,14 @@ function mount(): void {
   let presetCycleTimeoutId: number | null = null;
   let presetCycleKey: string | null = null;
   let loadedPresetId: string | null = null;
+  let sidebarMessage: string | null = null;
   let urlDialogMode: 'open-url' | 'import-playlist-url' = 'open-url';
 
   mediaElement.volume = storedVolumeSettings?.volume ?? 1;
   mediaElement.muted = storedVolumeSettings?.muted ?? false;
+  mediaElement.playbackRate = 1;
   volumeInput.value = `${Math.round((mediaElement.muted ? 0 : mediaElement.volume) * 100)}`;
+  playbackRateSelect.value = '1';
   bindCopyButton(copyDiagButton, () => diagOutput.textContent ?? '');
   bindCopyButton(copyLogsButton, () => logsOutput.textContent ?? '');
 
@@ -791,7 +871,12 @@ function mount(): void {
     }
 
     const info = state.mediaInfo;
+    const sourceSize =
+      state.source?.kind === 'local-file'
+        ? state.source.file.size
+        : null;
     const entries = [
+      ['File size', formatFileSize(sourceSize)],
       ['Container', info?.container ?? '-'],
       ['Duration', info?.durationSec !== null && info?.durationSec !== undefined ? formatTime(info.durationSec) : '-'],
       ['Bitrate', info?.bitrate ?? '-'],
@@ -900,6 +985,8 @@ function mount(): void {
     debugTabButton.classList.toggle('panel-tab--active', rightPanelTab === 'debug');
     playlistToggleButton.textContent = playlistVisible ? 'Playlist ✓' : 'Playlist';
     debugToggleButton.textContent = debugVisible ? 'Debug ✓' : 'Debug';
+    playlistSaveButton.disabled = playlist.length === 0;
+    playlistClearButton.disabled = playlist.length === 0;
     renderPlaylist();
   }
 
@@ -1027,6 +1114,7 @@ function mount(): void {
     logsOutput.textContent = state.logs.join('\n');
 
     const isPlaying = state.status === 'playing';
+    playbackRateSelect.value = `${mediaElement.playbackRate}`;
     playToggleButton.setAttribute('aria-label', isPlaying ? 'Pause' : 'Play');
     playToggleIcon.textContent = isPlaying ? '⏸' : '▶';
     const isMuted = mediaElement.muted || mediaElement.volume === 0;
@@ -1072,8 +1160,8 @@ function mount(): void {
                 : 'Native browser playback is available for this local file. FFmpeg mode can still be forced.'
               : 'Native browser playback was not detected. FFmpeg fallback is active by default for this local file.';
 
-    errorBox.textContent = state.error ?? '';
-    errorBox.hidden = !state.error;
+    errorBox.textContent = state.error ?? sidebarMessage ?? '';
+    errorBox.hidden = !(state.error ?? sidebarMessage);
 
     renderSession(state);
     renderMediaInfo(state);
@@ -1147,6 +1235,71 @@ function mount(): void {
     urlDialogError.textContent = message;
   }
 
+  function setSidebarMessage(message: string | null): void {
+    sidebarMessage = message;
+  }
+
+  function serializePlaylistToM3u(items: PlaylistItem<MediaSourceItem>[]): { text: string; skippedLocalFiles: number } {
+    const lines = ['#EXTM3U'];
+    let skippedLocalFiles = 0;
+
+    for (const item of items) {
+      if (item.source.kind === 'local-file') {
+        skippedLocalFiles += 1;
+        continue;
+      }
+
+      lines.push(`#EXTINF:-1,${item.name}`);
+      lines.push(item.source.url);
+    }
+
+    return {
+      text: `${lines.join('\n')}\n`,
+      skippedLocalFiles,
+    };
+  }
+
+  function downloadPlaylist(): void {
+    const { text, skippedLocalFiles } = serializePlaylistToM3u(playlist);
+    if (playlist.length === 0) {
+      setSidebarMessage('Playlist is empty.');
+      render(currentState);
+      return;
+    }
+
+    if (text.trim() === '#EXTM3U') {
+      setSidebarMessage(
+        'Only remote URLs and HLS streams can be saved to .m3u. Local files are omitted because browsers do not expose stable file paths.',
+      );
+      render(currentState);
+      return;
+    }
+
+    const blob = new Blob([text], { type: 'audio/x-mpegurl' });
+    const downloadUrl = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    link.href = downloadUrl;
+    link.download = 'playlist.m3u';
+    link.click();
+    URL.revokeObjectURL(downloadUrl);
+
+    setSidebarMessage(
+      skippedLocalFiles > 0
+        ? `Playlist saved. ${skippedLocalFiles} local file${skippedLocalFiles === 1 ? '' : 's'} were skipped because browsers do not expose stable file paths.`
+        : null,
+    );
+    render(currentState);
+  }
+
+  async function clearPlaylist(): Promise<void> {
+    playlist = [];
+    playlistCounter = 0;
+    loadedPresetId = null;
+    setSidebarMessage(null);
+    controller.clear();
+    render(controller.state);
+  }
+
   function addSourcesToPlaylist(
     sources: MediaSourceItem[],
     options?: {
@@ -1159,6 +1312,7 @@ function mount(): void {
       return;
     }
 
+    setSidebarMessage(null);
     const newItems = sources.map((source) => createPlaylistItem(source));
     playlist = [...playlist, ...newItems];
     if (options?.showPlaylist ?? true) {
@@ -1516,6 +1670,28 @@ function mount(): void {
     showDialog(aboutDialog);
   });
 
+  playlistSaveButton.addEventListener('click', () => {
+    downloadPlaylist();
+  });
+
+  playlistClearButton.addEventListener('click', () => {
+    if (playlist.length === 0) {
+      return;
+    }
+
+    playlistClearMessage.textContent = `Are you sure you want to clear the playlist? ${playlist.length} item${playlist.length === 1 ? '' : 's'} will be removed.`;
+    showDialog(playlistClearDialog);
+  });
+
+  playlistClearCancel.addEventListener('click', () => {
+    playlistClearDialog.close();
+  });
+
+  playlistClearConfirm.addEventListener('click', () => {
+    playlistClearDialog.close();
+    void clearPlaylist();
+  });
+
   urlDialogCancel.addEventListener('click', () => {
     urlDialog.close();
   });
@@ -1596,8 +1772,8 @@ function mount(): void {
     try {
       await importPlaylistFromFile(file);
     } catch (error) {
-      errorBox.textContent = error instanceof Error ? error.message : 'The playlist file could not be imported.';
-      errorBox.hidden = false;
+      setSidebarMessage(error instanceof Error ? error.message : 'The playlist file could not be imported.');
+      render(currentState);
     }
   });
 
@@ -1624,6 +1800,11 @@ function mount(): void {
 
   stopButton.addEventListener('click', async () => {
     await controller.stop();
+  });
+
+  playbackRateSelect.addEventListener('change', () => {
+    mediaElement.playbackRate = Number(playbackRateSelect.value);
+    render(currentState);
   });
 
   muteButton.addEventListener('click', () => {

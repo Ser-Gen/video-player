@@ -160,5 +160,6 @@ export interface PlayerController {
   pause(): void;
   stop(): Promise<void>;
   seek(timeSec: number): Promise<void>;
+  clear(): void;
   dispose(): void;
 }

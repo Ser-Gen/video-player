@@ -326,6 +326,19 @@ export class BrowserMediaPlayerController implements PlayerController {
     await this.startFfmpegSeek(timeSec, true);
   }
 
+  clear(): void {
+    this.shouldAutoplayWhenReady = false;
+    this.transcodeToken += 1;
+    this.probeToken += 1;
+    this.pendingFfmpegSeek = null;
+    this.pauseMediaElement('public-clear');
+    this.clearAttachedSource('clear:reset-all-sources');
+    this.setState((prev) => ({
+      ...createInitialState(),
+      playbackMode: prev.playbackMode,
+    }));
+  }
+
   dispose(): void {
     if (this.disposed) {
       return;

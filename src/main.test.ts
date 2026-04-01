@@ -142,6 +142,23 @@ describe('main ui', () => {
     expect(localStorage.getItem('video-player:volume-settings')).toBe('{"volume":0.27,"muted":false}');
   });
 
+  it('updates playback speed from the transport control', async () => {
+    await loadMain();
+
+    const mediaElement = document.querySelector<HTMLVideoElement>('#media-element');
+    const playbackRateSelect = document.querySelector<HTMLSelectElement>('#playback-rate-select');
+
+    expect(mediaElement).not.toBeNull();
+    expect(playbackRateSelect).not.toBeNull();
+    expect(mediaElement!.playbackRate).toBe(1);
+
+    playbackRateSelect!.value = '1.5';
+    playbackRateSelect!.dispatchEvent(new Event('change', { bubbles: true }));
+
+    expect(mediaElement!.playbackRate).toBe(1.5);
+    expect(playbackRateSelect!.value).toBe('1.5');
+  });
+
   it('restores visualization settings on mount', async () => {
     localStorage.setItem(
       'video-player:visualization-settings',
@@ -227,6 +244,20 @@ describe('main ui', () => {
       expect(mediaElement.classList.contains('media-element--hidden')).toBe(true);
     });
   }, 15000);
+
+  it('shows a human-readable local file size in media info', async () => {
+    await loadMain();
+
+    const videoInput = document.querySelector<HTMLInputElement>('#open-file-input')!;
+    await userEvent.upload(videoInput, new File(['123456'], 'clip.mp4', { type: 'video/mp4' }));
+
+    await userEvent.click(document.querySelector<HTMLButtonElement>('#view-menu-button')!);
+    await userEvent.click(document.querySelector<HTMLButtonElement>('#debug-toggle-button')!);
+
+    await waitFor(() => {
+      expect(document.querySelector<HTMLElement>('#media-info')?.textContent).toContain('6 B');
+    });
+  });
 
   it('toggles playback when the visualization canvas is clicked', async () => {
     await loadMain();
@@ -354,6 +385,65 @@ describe('main ui', () => {
 
     await waitFor(() => {
       expect(document.querySelector<HTMLElement>('#playlist-list')?.textContent).toContain('Local Stream');
+    });
+  });
+
+  it('saves playlist entries as m3u', async () => {
+    const createObjectUrlSpy = vi.fn(() => 'blob:playlist');
+    const revokeObjectUrlSpy = vi.fn();
+    const clickSpy = vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(() => {});
+    Object.defineProperty(URL, 'createObjectURL', {
+      configurable: true,
+      writable: true,
+      value: createObjectUrlSpy,
+    });
+    Object.defineProperty(URL, 'revokeObjectURL', {
+      configurable: true,
+      writable: true,
+      value: revokeObjectUrlSpy,
+    });
+
+    await loadMain();
+
+    await userEvent.click(document.querySelector<HTMLButtonElement>('#file-menu-button')!);
+    await userEvent.click(document.querySelector<HTMLButtonElement>('#open-url-button')!);
+    await userEvent.type(document.querySelector<HTMLInputElement>('#url-dialog-input')!, 'https://example.com/video.mp4');
+    await userEvent.click(document.querySelector<HTMLButtonElement>('#url-dialog-submit')!);
+
+    await waitFor(() => {
+      expect(document.querySelector<HTMLButtonElement>('#playlist-save-button')?.disabled).toBe(false);
+    });
+
+    await userEvent.click(document.querySelector<HTMLButtonElement>('#playlist-save-button')!);
+
+    expect(createObjectUrlSpy).toHaveBeenCalledTimes(1);
+    expect(clickSpy).toHaveBeenCalledTimes(1);
+    expect(revokeObjectUrlSpy).toHaveBeenCalledWith('blob:playlist');
+  });
+
+  it('clears the playlist after confirmation', async () => {
+    await loadMain();
+
+    await userEvent.click(document.querySelector<HTMLButtonElement>('#file-menu-button')!);
+    await userEvent.click(document.querySelector<HTMLButtonElement>('#open-url-button')!);
+    await userEvent.type(document.querySelector<HTMLInputElement>('#url-dialog-input')!, 'https://example.com/video.mp4');
+    await userEvent.click(document.querySelector<HTMLButtonElement>('#url-dialog-submit')!);
+
+    await waitFor(() => {
+      expect(document.querySelector<HTMLElement>('#playlist-list')?.textContent).toContain('video.mp4');
+    });
+
+    await userEvent.click(document.querySelector<HTMLButtonElement>('#playlist-clear-button')!);
+
+    expect(document.querySelector<HTMLDialogElement>('#playlist-clear-dialog')?.hasAttribute('open')).toBe(true);
+    expect(document.querySelector<HTMLElement>('#playlist-clear-message')?.textContent).toContain('1 item');
+
+    await userEvent.click(document.querySelector<HTMLButtonElement>('#playlist-clear-confirm')!);
+
+    await waitFor(() => {
+      expect(document.querySelector<HTMLElement>('#playlist-list')?.textContent).toBe('');
+      expect(document.querySelector<HTMLElement>('#playlist-empty')?.hidden).toBe(false);
+      expect(document.querySelector<HTMLElement>('#header-file-name')?.textContent).toContain('No source loaded');
     });
   });
 });

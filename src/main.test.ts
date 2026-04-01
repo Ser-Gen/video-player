@@ -92,10 +92,16 @@ async function loadMain(options?: MainMockOptions) {
   await import('./main');
 }
 
+function setLocationSearch(search: string): void {
+  const normalizedSearch = search.length === 0 ? '' : search.startsWith('?') ? search : `?${search}`;
+  window.history.replaceState({}, '', `${window.location.pathname}${normalizedSearch}`);
+}
+
 describe('main ui', () => {
   beforeEach(() => {
     localStorage.clear();
     document.body.innerHTML = '<div id="app"></div>';
+    setLocationSearch('');
     vi.resetModules();
     vi.clearAllMocks();
     vi.stubGlobal('fetch', vi.fn());
@@ -294,6 +300,61 @@ describe('main ui', () => {
     await waitFor(() => {
       expect(document.querySelector<HTMLElement>('#header-file-name')?.textContent).toContain('video.mp4');
       expect(document.querySelector<HTMLElement>('#playlist-list')?.textContent).toContain('video.mp4');
+    });
+  });
+
+  it('loads initPlaylist from the url on startup without autoplay', async () => {
+    setLocationSearch(
+      `?initPlaylist=${encodeURIComponent(
+        JSON.stringify([
+          { url: 'https://cdn.example.com/stream.mp3', name: 'Startup Stream' },
+          { url: 'https://cdn.example.com/live', name: 'Live HLS', mimeType: 'application/vnd.apple.mpegurl' },
+        ]),
+      )}`,
+    );
+
+    const playSpy = vi.spyOn(HTMLMediaElement.prototype, 'play').mockResolvedValue();
+
+    await loadMain();
+
+    await waitFor(() => {
+      expect(document.querySelector<HTMLElement>('#playlist-list')?.textContent).toContain('Startup Stream');
+      expect(document.querySelector<HTMLElement>('#playlist-list')?.textContent).toContain('Live HLS');
+      expect(document.querySelector<HTMLElement>('#playlist-empty')?.hidden).toBe(true);
+      expect(document.querySelector<HTMLElement>('#header-file-name')?.textContent).toContain('No source loaded');
+    });
+
+    expect(playSpy).not.toHaveBeenCalled();
+  });
+
+  it('skips invalid initPlaylist entries and shows an aggregated message', async () => {
+    setLocationSearch(
+      `?initPlaylist=${encodeURIComponent(
+        JSON.stringify([
+          { url: 'https://cdn.example.com/ok.mp4', name: 'Valid Entry' },
+          { name: 'Missing URL' },
+          'not-an-object',
+          { url: '/relative-only' },
+        ]),
+      )}`,
+    );
+
+    await loadMain();
+
+    await waitFor(() => {
+      expect(document.querySelector<HTMLElement>('#playlist-list')?.textContent).toContain('Valid Entry');
+      expect(document.querySelector<HTMLElement>('#error-box')?.textContent).toContain('Loaded 1 item from initPlaylist. Skipped 3 invalid entries.');
+    });
+  });
+
+  it('shows one error when initPlaylist json is malformed', async () => {
+    setLocationSearch('?initPlaylist=%5Bnot-json');
+
+    await loadMain();
+
+    await waitFor(() => {
+      expect(document.querySelector<HTMLElement>('#playlist-list')?.textContent).toBe('');
+      expect(document.querySelector<HTMLElement>('#error-box')?.textContent).toContain('initPlaylist must be a valid JSON array.');
     });
   });
 

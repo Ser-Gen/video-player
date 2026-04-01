@@ -2,7 +2,7 @@ import './styles.css';
 import { BrowserMediaPlayerController } from './mediaController';
 import { getAdjacentIndexAfterRemoval, markPlaylistItemPlayed, movePlaylistItem, setCurrentPlaylistItem, type PlaylistItem } from './playlist';
 import { parseM3uPlaylist } from './m3u';
-import { createHlsPlaylistSource, createLocalFileSource, createRemoteUrlSource, getSourceName } from './sourceUtils';
+import { createHlsPlaylistSource, createLocalFileSource, createRemoteUrlSource, getSourceName, isHlsMimeType } from './sourceUtils';
 import type {
   MediaSourceItem,
   PlaybackMode,
@@ -201,6 +201,12 @@ function normalizeMimeTypeInput(value: string): string | null {
   return trimmed;
 }
 
+type InitPlaylistEntry = {
+  url: string;
+  name?: string;
+  mimeType?: string | null;
+};
+
 function isSameOriginRemoteSource(source: MediaSourceItem): boolean {
   if (source.kind === 'local-file') {
     return true;
@@ -211,6 +217,96 @@ function isSameOriginRemoteSource(source: MediaSourceItem): boolean {
   } catch {
     return false;
   }
+}
+
+function normalizeInitPlaylistEntry(value: unknown): InitPlaylistEntry | null {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    return null;
+  }
+
+  const candidate = value as {
+    url?: unknown;
+    name?: unknown;
+    mimeType?: unknown;
+  };
+  if (typeof candidate.url !== 'string') {
+    return null;
+  }
+
+  const normalizedUrl = normalizeUrlInput(candidate.url);
+  if (!normalizedUrl) {
+    return null;
+  }
+
+  return {
+    url: normalizedUrl,
+    name: typeof candidate.name === 'string' && candidate.name.trim().length > 0 ? candidate.name.trim() : undefined,
+    mimeType:
+      typeof candidate.mimeType === 'string' && candidate.mimeType.trim().length > 0
+        ? normalizeMimeTypeInput(candidate.mimeType)
+        : undefined,
+  };
+}
+
+function createSourceFromInitPlaylistEntry(entry: InitPlaylistEntry): MediaSourceItem {
+  if (/\.m3u8(?:$|[?#])/i.test(entry.url) || isHlsMimeType(entry.mimeType)) {
+    return createHlsPlaylistSource(entry.url, entry.name);
+  }
+
+  return createRemoteUrlSource(entry.url, entry.name, entry.mimeType);
+}
+
+function parseInitPlaylistFromUrl(): { sources: MediaSourceItem[]; message: string | null } {
+  const initPlaylistRaw = new URLSearchParams(window.location.search).get('initPlaylist');
+  if (!initPlaylistRaw) {
+    return {
+      sources: [],
+      message: null,
+    };
+  }
+
+  let parsedValue: unknown;
+  try {
+    parsedValue = JSON.parse(initPlaylistRaw);
+  } catch {
+    return {
+      sources: [],
+      message: 'initPlaylist must be a valid JSON array.',
+    };
+  }
+
+  if (!Array.isArray(parsedValue)) {
+    return {
+      sources: [],
+      message: 'initPlaylist must be a valid JSON array.',
+    };
+  }
+
+  const normalizedEntries = parsedValue.map((entry) => normalizeInitPlaylistEntry(entry));
+  const sources = normalizedEntries.filter((entry): entry is InitPlaylistEntry => entry !== null).map(createSourceFromInitPlaylistEntry);
+  const skippedCount = normalizedEntries.length - sources.length;
+
+  if (sources.length === 0 && skippedCount > 0) {
+    return {
+      sources: [],
+      message: `initPlaylist did not contain any valid entries. Skipped ${skippedCount} invalid entr${skippedCount === 1 ? 'y' : 'ies'}.`,
+    };
+  }
+
+  if (sources.length === 0) {
+    return {
+      sources: [],
+      message: null,
+    };
+  }
+
+  return {
+    sources,
+    message:
+      skippedCount > 0
+        ? `Loaded ${sources.length} item${sources.length === 1 ? '' : 's'} from initPlaylist. Skipped ${skippedCount} invalid entr${skippedCount === 1 ? 'y' : 'ies'}.`
+        : null,
+  };
 }
 
 function mount(): void {
@@ -1986,6 +2082,18 @@ function mount(): void {
     visualizer.dispose();
     controller.dispose();
   });
+
+  const initPlaylist = parseInitPlaylistFromUrl();
+  if (initPlaylist.sources.length > 0) {
+    addSourcesToPlaylist(initPlaylist.sources, {
+      autoplayFirst: false,
+      showPlaylist: true,
+      markPreviousAsPlayed: false,
+    });
+  }
+  if (initPlaylist.message) {
+    setSidebarMessage(initPlaylist.message);
+  }
 
   render(currentState);
 }

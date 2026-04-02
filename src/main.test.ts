@@ -186,6 +186,7 @@ describe('main ui', () => {
     expect(mediaElement!.volume).toBe(1);
     expect(volumeInput!.value).toBe('100');
     expect(volumeValue!.textContent).toBe('100%');
+    expect(document.querySelector<HTMLButtonElement>('#playlist-share-button')?.disabled).toBe(true);
   });
 
   it('stores volume changes in localStorage', async () => {
@@ -712,6 +713,111 @@ describe('main ui', () => {
     expect(createObjectUrlSpy).toHaveBeenCalledTimes(1);
     expect(clickSpy).toHaveBeenCalledTimes(1);
     expect(revokeObjectUrlSpy).toHaveBeenCalledWith('blob:playlist');
+  });
+
+  it('opens a share dialog with an initPlaylist url for remote playlist entries', async () => {
+    await loadMain();
+
+    await userEvent.click(document.querySelector<HTMLButtonElement>('#file-menu-button')!);
+    await userEvent.click(document.querySelector<HTMLButtonElement>('#open-url-button')!);
+    await userEvent.type(document.querySelector<HTMLInputElement>('#url-dialog-input')!, 'https://example.com/video.mp4');
+    await userEvent.click(document.querySelector<HTMLButtonElement>('#url-dialog-submit')!);
+
+    await userEvent.click(document.querySelector<HTMLButtonElement>('#file-menu-button')!);
+    await userEvent.click(document.querySelector<HTMLButtonElement>('#open-url-button')!);
+    await userEvent.type(document.querySelector<HTMLInputElement>('#url-dialog-input')!, 'https://example.com/live.m3u8');
+    await userEvent.click(document.querySelector<HTMLButtonElement>('#url-dialog-submit')!);
+
+    await waitFor(() => {
+      expect(document.querySelector<HTMLButtonElement>('#playlist-share-button')?.disabled).toBe(false);
+    });
+
+    await userEvent.click(document.querySelector<HTMLButtonElement>('#playlist-share-button')!);
+
+    await waitFor(() => {
+      expect(document.querySelector<HTMLDialogElement>('#playlist-share-dialog')?.hasAttribute('open')).toBe(true);
+    });
+
+    const shareUrl = document.querySelector<HTMLInputElement>('#playlist-share-input')?.value ?? '';
+    const parsedUrl = new URL(shareUrl);
+    const initPlaylist = JSON.parse(parsedUrl.searchParams.get('initPlaylist') ?? '[]') as Array<Record<string, string>>;
+
+    expect(initPlaylist).toEqual([
+      { url: 'https://example.com/video.mp4', name: 'video.mp4', mimeType: null },
+      {
+        url: 'https://example.com/live.m3u8',
+        name: 'live.m3u8',
+        mimeType: 'application/vnd.apple.mpegurl',
+      },
+    ]);
+    expect(document.querySelector<HTMLElement>('#playlist-share-warning')?.hasAttribute('hidden')).toBe(true);
+  });
+
+  it('warns about local files when sharing a playlist', async () => {
+    await loadMain();
+
+    const openFileInput = document.querySelector<HTMLInputElement>('#open-file-input')!;
+    await userEvent.upload(openFileInput, new File(['local'], 'Local Track.mp3', { type: 'audio/mpeg' }));
+
+    await userEvent.click(document.querySelector<HTMLButtonElement>('#file-menu-button')!);
+    await userEvent.click(document.querySelector<HTMLButtonElement>('#open-url-button')!);
+    await userEvent.type(document.querySelector<HTMLInputElement>('#url-dialog-input')!, 'https://example.com/video.mp4');
+    await userEvent.click(document.querySelector<HTMLButtonElement>('#url-dialog-submit')!);
+
+    await userEvent.click(document.querySelector<HTMLButtonElement>('#playlist-share-button')!);
+
+    await waitFor(() => {
+      expect(document.querySelector<HTMLElement>('#playlist-share-warning')?.hasAttribute('hidden')).toBe(false);
+      expect(document.querySelector<HTMLElement>('#playlist-share-warning-text')?.textContent).toContain('Some playlist items');
+      expect(document.querySelector<HTMLElement>('#playlist-share-warning-list')?.textContent).toContain('Local Track.mp3');
+    });
+
+    const shareUrl = document.querySelector<HTMLInputElement>('#playlist-share-input')?.value ?? '';
+    const parsedUrl = new URL(shareUrl);
+    const initPlaylist = JSON.parse(parsedUrl.searchParams.get('initPlaylist') ?? '[]') as Array<Record<string, string>>;
+    expect(initPlaylist).toEqual([{ url: 'https://example.com/video.mp4', name: 'video.mp4', mimeType: null }]);
+  });
+
+  it('shows a warning and omits initPlaylist when only local files are shared', async () => {
+    await loadMain();
+
+    const openFileInput = document.querySelector<HTMLInputElement>('#open-file-input')!;
+    await userEvent.upload(openFileInput, new File(['local'], 'Only Local.mp3', { type: 'audio/mpeg' }));
+
+    await userEvent.click(document.querySelector<HTMLButtonElement>('#playlist-share-button')!);
+
+    await waitFor(() => {
+      expect(document.querySelector<HTMLElement>('#playlist-share-warning-text')?.textContent).toContain('No playlist items can be added');
+      expect(document.querySelector<HTMLElement>('#playlist-share-warning-list')?.textContent).toContain('Only Local.mp3');
+    });
+
+    const shareUrl = document.querySelector<HTMLInputElement>('#playlist-share-input')?.value ?? '';
+    const parsedUrl = new URL(shareUrl);
+    expect(parsedUrl.searchParams.get('initPlaylist')).toBeNull();
+  });
+
+  it('copies the generated share url to the clipboard', async () => {
+    const writeText = vi.fn().mockResolvedValue(undefined);
+    Object.assign(navigator, {
+      clipboard: {
+        writeText,
+      },
+    });
+
+    await loadMain();
+
+    await userEvent.click(document.querySelector<HTMLButtonElement>('#file-menu-button')!);
+    await userEvent.click(document.querySelector<HTMLButtonElement>('#open-url-button')!);
+    await userEvent.type(document.querySelector<HTMLInputElement>('#url-dialog-input')!, 'https://example.com/video.mp4');
+    await userEvent.click(document.querySelector<HTMLButtonElement>('#url-dialog-submit')!);
+
+    await userEvent.click(document.querySelector<HTMLButtonElement>('#playlist-share-button')!);
+    await userEvent.click(document.querySelector<HTMLButtonElement>('#playlist-share-copy-button')!);
+
+    await waitFor(() => {
+      expect(writeText).toHaveBeenCalledTimes(1);
+      expect(writeText.mock.calls[0]?.[0]).toContain('initPlaylist=');
+    });
   });
 
   it('clears the playlist after confirmation', async () => {

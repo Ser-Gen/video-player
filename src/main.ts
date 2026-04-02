@@ -464,6 +464,7 @@ function mount(): void {
             <div class="section-head">
               <h2>Playlist</h2>
               <div class="section-actions">
+                <button id="playlist-share-button" class="copy-button" type="button">Share</button>
                 <button id="playlist-save-button" class="copy-button" type="button">Save</button>
                 <button id="playlist-clear-button" class="copy-button" type="button">Clear</button>
               </div>
@@ -550,6 +551,38 @@ function mount(): void {
           <div class="dialog-actions">
             <button id="url-dialog-cancel" class="control-button" type="button">Cancel</button>
             <button id="url-dialog-submit" class="control-button accent" type="submit">Open</button>
+          </div>
+        </form>
+      </dialog>
+
+      <dialog id="playlist-share-dialog" class="about-dialog">
+        <form method="dialog" class="about-dialog-form">
+          <h2>Share Playlist</h2>
+          <p id="playlist-share-description">Copy a link that restores the current remote playlist on page open.</p>
+          <div class="share-link-row">
+            <label class="stack-field share-link-field">
+              <span class="stack-label">Share URL</span>
+              <input
+                id="playlist-share-input"
+                class="dialog-input"
+                type="url"
+                readonly
+                placeholder="Share URL will appear here"
+              />
+            </label>
+            <button
+              id="playlist-share-copy-button"
+              class="control-button"
+              type="button"
+              data-label="Copy"
+            >Copy</button>
+          </div>
+          <div id="playlist-share-warning" class="share-warning" hidden>
+            <p id="playlist-share-warning-text" class="sidebar-note"></p>
+            <ul id="playlist-share-warning-list" class="share-warning-list"></ul>
+          </div>
+          <div class="dialog-actions">
+            <button class="control-button accent" type="submit">Close</button>
           </div>
         </form>
       </dialog>
@@ -665,9 +698,37 @@ function mount(): void {
   const debugPanel = requireElement(app.querySelector<HTMLElement>('#debug-panel'), 'Debug panel not found');
   const playlistEmpty = requireElement(app.querySelector<HTMLElement>('#playlist-empty'), 'Playlist empty state not found');
   const playlistList = requireElement(app.querySelector<HTMLDivElement>('#playlist-list'), 'Playlist list not found');
+  const playlistShareButton = requireElement(
+    app.querySelector<HTMLButtonElement>('#playlist-share-button'),
+    'Playlist share button not found',
+  );
   const playlistSaveButton = requireElement(
     app.querySelector<HTMLButtonElement>('#playlist-save-button'),
     'Playlist save button not found',
+  );
+  const playlistShareDialog = requireElement(
+    app.querySelector<HTMLDialogElement>('#playlist-share-dialog'),
+    'Playlist share dialog not found',
+  );
+  const playlistShareInput = requireElement(
+    app.querySelector<HTMLInputElement>('#playlist-share-input'),
+    'Playlist share input not found',
+  );
+  const playlistShareCopyButton = requireElement(
+    app.querySelector<HTMLButtonElement>('#playlist-share-copy-button'),
+    'Playlist share copy button not found',
+  );
+  const playlistShareWarning = requireElement(
+    app.querySelector<HTMLElement>('#playlist-share-warning'),
+    'Playlist share warning not found',
+  );
+  const playlistShareWarningText = requireElement(
+    app.querySelector<HTMLElement>('#playlist-share-warning-text'),
+    'Playlist share warning text not found',
+  );
+  const playlistShareWarningList = requireElement(
+    app.querySelector<HTMLUListElement>('#playlist-share-warning-list'),
+    'Playlist share warning list not found',
   );
   const playlistClearButton = requireElement(
     app.querySelector<HTMLButtonElement>('#playlist-clear-button'),
@@ -736,6 +797,7 @@ function mount(): void {
   playbackRateSelect.value = '1';
   bindCopyButton(copyDiagButton, () => diagOutput.textContent ?? '');
   bindCopyButton(copyLogsButton, () => logsOutput.textContent ?? '');
+  bindCopyButton(playlistShareCopyButton, () => playlistShareInput.value);
 
   function getSelectedPresetEntry(): VisualizationPresetEntry | null {
     return presetEntries.find((entry) => entry.id === visualizationSettings.selectedPresetId) ?? null;
@@ -1202,6 +1264,7 @@ function mount(): void {
     debugTabButton.classList.toggle('panel-tab--active', rightPanelTab === 'debug');
     playlistToggleButton.textContent = playlistVisible ? 'Playlist ✓' : 'Playlist';
     debugToggleButton.textContent = debugVisible ? 'Debug ✓' : 'Debug';
+    playlistShareButton.disabled = playlist.length === 0;
     playlistSaveButton.disabled = playlist.length === 0;
     playlistClearButton.disabled = playlist.length === 0;
     renderPlaylist();
@@ -1433,6 +1496,13 @@ function mount(): void {
     urlDialogError.textContent = '';
   }
 
+  function resetPlaylistShareDialog(): void {
+    playlistShareInput.value = '';
+    playlistShareWarning.hidden = true;
+    playlistShareWarningText.textContent = '';
+    playlistShareWarningList.innerHTML = '';
+  }
+
   function openUrlDialog(mode: 'open-url' | 'import-playlist-url'): void {
     urlDialogMode = mode;
     resetUrlDialog();
@@ -1456,6 +1526,82 @@ function mount(): void {
 
   function setSidebarMessage(message: string | null): void {
     sidebarMessage = message;
+  }
+
+  function serializePlaylistToInitPlaylist(items: PlaylistItem<MediaSourceItem>[]): {
+    entries: InitPlaylistEntry[];
+    skippedLocalFiles: string[];
+  } {
+    const entries: InitPlaylistEntry[] = [];
+    const skippedLocalFiles: string[] = [];
+
+    for (const item of items) {
+      if (item.source.kind === 'local-file') {
+        skippedLocalFiles.push(item.name);
+        continue;
+      }
+
+      if (item.source.kind === 'hls-playlist') {
+        entries.push({
+          url: item.source.url,
+          name: item.name,
+          mimeType: 'application/vnd.apple.mpegurl',
+        });
+        continue;
+      }
+
+      entries.push({
+        url: item.source.url,
+        name: item.name,
+        mimeType: item.source.mimeType,
+      });
+    }
+
+    return {
+      entries,
+      skippedLocalFiles,
+    };
+  }
+
+  function createSharePlaylistUrl(items: PlaylistItem<MediaSourceItem>[]): {
+    url: string;
+    skippedLocalFiles: string[];
+  } {
+    const { entries, skippedLocalFiles } = serializePlaylistToInitPlaylist(items);
+    const url = new URL(window.location.href);
+    if (entries.length > 0) {
+      url.searchParams.set('initPlaylist', JSON.stringify(entries));
+    } else {
+      url.searchParams.delete('initPlaylist');
+    }
+
+    return {
+      url: url.toString(),
+      skippedLocalFiles,
+    };
+  }
+
+  function openPlaylistShareDialog(): void {
+    resetPlaylistShareDialog();
+    const { url, skippedLocalFiles } = createSharePlaylistUrl(playlist);
+    playlistShareInput.value = url;
+
+    if (skippedLocalFiles.length > 0) {
+      playlistShareWarning.hidden = false;
+      playlistShareWarningText.textContent =
+        skippedLocalFiles.length === playlist.length
+          ? 'No playlist items can be added to the share URL. Local files cannot be passed in initPlaylist.'
+          : 'Some playlist items cannot be added to the share URL. Local files cannot be passed in initPlaylist.';
+      playlistShareWarningList.innerHTML = skippedLocalFiles
+        .map((name) => `<li>${escapeHtml(name)}</li>`)
+        .join('');
+    }
+
+    showDialog(playlistShareDialog);
+    queueMicrotask(() => {
+      playlistShareInput.focus();
+      playlistShareInput.select();
+    });
   }
 
   function serializePlaylistToM3u(items: PlaylistItem<MediaSourceItem>[]): { text: string; skippedLocalFiles: number } {
@@ -1950,6 +2096,14 @@ function mount(): void {
     downloadPlaylist();
   });
 
+  playlistShareButton.addEventListener('click', () => {
+    if (playlist.length === 0) {
+      return;
+    }
+
+    openPlaylistShareDialog();
+  });
+
   playlistClearButton.addEventListener('click', () => {
     if (playlist.length === 0) {
       return;
@@ -1974,6 +2128,10 @@ function mount(): void {
 
   urlDialog.addEventListener('close', () => {
     resetUrlDialog();
+  });
+
+  playlistShareDialog.addEventListener('close', () => {
+    resetPlaylistShareDialog();
   });
 
   urlDialogForm.addEventListener('submit', async (event) => {

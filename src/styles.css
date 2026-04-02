@@ -725,6 +725,34 @@ dd {
   gap: 8px;
 }
 
+.share-link-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 8px;
+  align-items: end;
+}
+
+.share-link-field {
+  margin-bottom: 0;
+}
+
+.share-warning {
+  margin-top: -4px;
+  padding-top: 8px;
+  border-top: 1px solid var(--border);
+}
+
+.share-warning-list {
+  margin: 8px 0 0;
+  padding-left: 18px;
+  color: var(--text-dim);
+  font-size: 0.82rem;
+}
+
+.share-warning-list li + li {
+  margin-top: 4px;
+}
+
 @keyframes spin {
   from {
     transform: rotate(0deg);

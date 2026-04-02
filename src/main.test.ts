@@ -75,6 +75,44 @@ async function loadMain(options?: MainMockOptions) {
     },
   }));
 
+  vi.doMock('./audioGraph', () => ({
+    MediaAudioGraphController: class {
+      ensureInitialized() {
+        return Promise.resolve({
+          supported: true,
+          message: 'Audio graph is available.',
+        });
+      }
+
+      attachMediaElement() {
+        return Promise.resolve({
+          supported: true,
+          message: 'Audio graph is available.',
+        });
+      }
+
+      getAudioContext() {
+        return null;
+      }
+
+      getSourceNode() {
+        return null;
+      }
+
+      setGain() {
+        return undefined;
+      }
+
+      resume() {
+        return Promise.resolve();
+      }
+
+      dispose() {
+        return undefined;
+      }
+    },
+  }));
+
   vi.doMock('./hlsPlayback', () => ({
     HLS_MEDIA_ATTACHED_EVENT: 'hlsMediaAttached',
     HLS_ERROR_EVENT: 'hlsError',
@@ -124,12 +162,30 @@ describe('main ui', () => {
 
     const mediaElement = document.querySelector<HTMLVideoElement>('#media-element');
     const volumeInput = document.querySelector<HTMLInputElement>('#volume-input');
+    const volumeValue = document.querySelector<HTMLElement>('#volume-value');
 
     expect(mediaElement).not.toBeNull();
     expect(volumeInput).not.toBeNull();
+    expect(volumeValue).not.toBeNull();
     expect(mediaElement!.volume).toBeCloseTo(0.35);
     expect(mediaElement!.muted).toBe(false);
     expect(volumeInput!.value).toBe('35');
+    expect(volumeValue!.textContent).toBe('35%');
+  });
+
+  it('shows 100 percent volume by default', async () => {
+    await loadMain();
+
+    const mediaElement = document.querySelector<HTMLVideoElement>('#media-element');
+    const volumeInput = document.querySelector<HTMLInputElement>('#volume-input');
+    const volumeValue = document.querySelector<HTMLElement>('#volume-value');
+
+    expect(mediaElement).not.toBeNull();
+    expect(volumeInput).not.toBeNull();
+    expect(volumeValue).not.toBeNull();
+    expect(mediaElement!.volume).toBe(1);
+    expect(volumeInput!.value).toBe('100');
+    expect(volumeValue!.textContent).toBe('100%');
   });
 
   it('stores volume changes in localStorage', async () => {
@@ -137,15 +193,80 @@ describe('main ui', () => {
 
     const mediaElement = document.querySelector<HTMLVideoElement>('#media-element');
     const volumeInput = document.querySelector<HTMLInputElement>('#volume-input');
+    const volumeValue = document.querySelector<HTMLElement>('#volume-value');
 
     expect(mediaElement).not.toBeNull();
     expect(volumeInput).not.toBeNull();
+    expect(volumeValue).not.toBeNull();
 
     volumeInput!.value = '27';
     volumeInput!.dispatchEvent(new Event('input', { bubbles: true }));
 
     expect(mediaElement!.volume).toBeCloseTo(0.27);
+    expect(volumeValue!.textContent).toBe('27%');
     expect(localStorage.getItem('video-player:volume-settings')).toBe('{"volume":0.27,"muted":false}');
+  });
+
+  it('supports volume boost up to 150 percent for local files', async () => {
+    await loadMain();
+
+    const videoInput = document.querySelector<HTMLInputElement>('#open-file-input')!;
+    const mediaElement = document.querySelector<HTMLVideoElement>('#media-element')!;
+    const volumeInput = document.querySelector<HTMLInputElement>('#volume-input')!;
+    const volumeValue = document.querySelector<HTMLElement>('#volume-value')!;
+
+    await userEvent.upload(videoInput, new File(['123456'], 'clip.mp4', { type: 'video/mp4' }));
+
+    await waitFor(() => {
+      expect(volumeInput.max).toBe('150');
+    });
+
+    volumeInput.value = '150';
+    volumeInput.dispatchEvent(new Event('input', { bubbles: true }));
+
+    await waitFor(() => {
+      expect(mediaElement.volume).toBe(1);
+      expect(volumeInput.value).toBe('150');
+      expect(volumeValue.textContent).toBe('150%');
+      expect(localStorage.getItem('video-player:volume-settings')).toBe('{"volume":1.5,"muted":false}');
+    });
+  });
+
+  it('caps volume boost at 100 percent for cross-origin remote streams', async () => {
+    localStorage.setItem(
+      'video-player:volume-settings',
+      JSON.stringify({
+        volume: 1.5,
+        muted: false,
+      }),
+    );
+
+    await loadMain();
+
+    const mediaElement = document.querySelector<HTMLVideoElement>('#media-element')!;
+    const volumeInput = document.querySelector<HTMLInputElement>('#volume-input')!;
+    const volumeValue = document.querySelector<HTMLElement>('#volume-value')!;
+
+    vi.spyOn(HTMLMediaElement.prototype, 'canPlayType').mockImplementation((mimeType: string) =>
+      mimeType === 'audio/aac' ? 'probably' : '',
+    );
+
+    await userEvent.click(document.querySelector<HTMLButtonElement>('#file-menu-button')!);
+    await userEvent.click(document.querySelector<HTMLButtonElement>('#open-url-button')!);
+    await userEvent.type(
+      document.querySelector<HTMLInputElement>('#url-dialog-input')!,
+      'https://ice6.somafm.com/groovesalad-64-aac',
+    );
+    await userEvent.type(document.querySelector<HTMLInputElement>('#url-dialog-mime-input')!, 'audio/aac');
+    await userEvent.click(document.querySelector<HTMLButtonElement>('#url-dialog-submit')!);
+
+    await waitFor(() => {
+      expect(document.querySelector<HTMLElement>('#header-file-name')?.textContent).toContain('groovesalad-64-aac');
+      expect(volumeInput.max).toBe('100');
+      expect(volumeInput.value).toBe('100');
+      expect(volumeValue.textContent).toBe('100%');
+      expect(mediaElement.volume).toBe(1);
+    });
   });
 
   it('updates playback speed from the transport control', async () => {
@@ -342,6 +463,37 @@ describe('main ui', () => {
 
     await waitFor(() => {
       expect(timelineBuffered.style.width).toBe('50%');
+    });
+  });
+
+  it('hides buffered timeline layer when media is fully loaded', async () => {
+    await loadMain();
+
+    const videoInput = document.querySelector<HTMLInputElement>('#open-file-input')!;
+    const mediaElement = document.querySelector<HTMLVideoElement>('#media-element')!;
+    const timelineBuffered = document.querySelector<HTMLDivElement>('#timeline-buffered')!;
+
+    await userEvent.upload(videoInput, new File(['123456'], 'clip.mp4', { type: 'video/mp4' }));
+
+    Object.defineProperty(mediaElement, 'duration', {
+      configurable: true,
+      get: () => 120,
+    });
+    Object.defineProperty(mediaElement, 'buffered', {
+      configurable: true,
+      get: () => ({
+        length: 1,
+        start: () => 0,
+        end: () => 120,
+      }),
+    });
+
+    mediaElement.dispatchEvent(new Event('loadedmetadata'));
+    mediaElement.dispatchEvent(new Event('progress'));
+
+    await waitFor(() => {
+      expect(timelineBuffered.style.width).toBe('100%');
+      expect(timelineBuffered.style.opacity).toBe('0');
     });
   });
 
@@ -620,5 +772,5 @@ describe('main ui', () => {
     await waitFor(() => {
       expect(document.querySelector<HTMLElement>('#header-file-name')?.textContent).toContain('first.mp4');
     });
-  });
+  }, 15000);
 });

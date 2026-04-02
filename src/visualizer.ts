@@ -1,4 +1,5 @@
 import type { ButterchurnVisualizer } from 'butterchurn';
+import { MediaAudioGraphController } from './audioGraph';
 import type { VisualizationSupportState } from './types';
 
 function getAudioContextConstructor():
@@ -56,15 +57,16 @@ export interface VisualizerAdapter {
 }
 
 export class ButterchurnVisualizerAdapter implements VisualizerAdapter {
-  private audioContext: AudioContext | null = null;
-  private mediaSourceNode: MediaElementAudioSourceNode | null = null;
   private connectedMediaElement: HTMLMediaElement | null = null;
   private visualizer: ButterchurnVisualizer | null = null;
   private animationFrameId: number | null = null;
   private butterchurnModulePromise: Promise<typeof import('butterchurn')> | null = null;
   supportState: VisualizationSupportState;
 
-  constructor(private readonly canvas: HTMLCanvasElement) {
+  constructor(
+    private readonly canvas: HTMLCanvasElement,
+    private readonly audioGraph: MediaAudioGraphController = new MediaAudioGraphController(),
+  ) {
     this.supportState = detectVisualizationSupport();
   }
 
@@ -73,7 +75,7 @@ export class ButterchurnVisualizerAdapter implements VisualizerAdapter {
       return this.supportState;
     }
 
-    if (this.visualizer && this.audioContext) {
+    if (this.visualizer) {
       return this.supportState;
     }
 
@@ -87,15 +89,21 @@ export class ButterchurnVisualizerAdapter implements VisualizerAdapter {
     }
 
     try {
-      if (!this.audioContext) {
-        this.audioContext = new AudioContextConstructor();
-      }
-
       if (!this.visualizer) {
         this.butterchurnModulePromise ??= import('butterchurn');
         const butterchurnModule = await this.butterchurnModulePromise;
         const butterchurn = butterchurnModule.default;
-        this.visualizer = butterchurn.createVisualizer(this.audioContext, this.canvas, {
+        const audioGraphSupportState = await this.audioGraph.ensureInitialized();
+        if (!audioGraphSupportState.supported) {
+          this.supportState = unsupportedState('audio_graph_failed', audioGraphSupportState.message);
+          return this.supportState;
+        }
+        const audioContext = this.audioGraph.getAudioContext();
+        if (!audioContext) {
+          this.supportState = unsupportedState('audio_graph_failed', 'Visualization is unavailable because the audio graph could not be initialized.');
+          return this.supportState;
+        }
+        this.visualizer = butterchurn.createVisualizer(audioContext, this.canvas, {
           width: Math.max(1, this.canvas.clientWidth || this.canvas.width || 1),
           height: Math.max(1, this.canvas.clientHeight || this.canvas.height || 1),
         });
@@ -119,22 +127,26 @@ export class ButterchurnVisualizerAdapter implements VisualizerAdapter {
 
   async attachMediaElement(mediaElement: HTMLMediaElement): Promise<VisualizationSupportState> {
     const supportState = await this.initialize();
-    if (!supportState.supported || !this.audioContext || !this.visualizer) {
+    if (!supportState.supported || !this.visualizer) {
       return supportState;
     }
 
-    if (this.connectedMediaElement === mediaElement && this.mediaSourceNode) {
+    if (this.connectedMediaElement === mediaElement && this.audioGraph.getSourceNode()) {
       return this.supportState;
     }
 
     try {
-      if (this.mediaSourceNode) {
-        this.mediaSourceNode.disconnect();
+      const audioGraphSupportState = await this.audioGraph.attachMediaElement(mediaElement);
+      if (!audioGraphSupportState.supported) {
+        this.supportState = unsupportedState('audio_graph_failed', audioGraphSupportState.message);
+        return this.supportState;
       }
-
-      this.mediaSourceNode = this.audioContext.createMediaElementSource(mediaElement);
-      this.mediaSourceNode.connect(this.audioContext.destination);
-      this.visualizer.connectAudio(this.mediaSourceNode);
+      const sourceNode = this.audioGraph.getSourceNode();
+      if (!sourceNode) {
+        this.supportState = unsupportedState('audio_graph_failed', 'Visualization is unavailable because the audio graph source is missing.');
+        return this.supportState;
+      }
+      this.visualizer.connectAudio(sourceNode);
       this.connectedMediaElement = mediaElement;
       this.supportState = {
         supported: true,
@@ -171,11 +183,11 @@ export class ButterchurnVisualizerAdapter implements VisualizerAdapter {
   }
 
   start(): void {
-    if (!this.audioContext || !this.visualizer || this.animationFrameId !== null) {
+    if (!this.visualizer || this.animationFrameId !== null) {
       return;
     }
 
-    void this.audioContext.resume().catch(() => {
+    void this.audioGraph.resume().catch(() => {
       // Resume failures are surfaced through user interaction; the visualizer can remain paused.
     });
 
@@ -196,16 +208,7 @@ export class ButterchurnVisualizerAdapter implements VisualizerAdapter {
 
   dispose(): void {
     this.stop();
-    if (this.mediaSourceNode) {
-      this.mediaSourceNode.disconnect();
-      this.mediaSourceNode = null;
-    }
-    if (this.audioContext) {
-      void this.audioContext.close().catch(() => {
-        // Ignore close failures during shutdown.
-      });
-      this.audioContext = null;
-    }
+    this.audioGraph.dispose();
     this.visualizer = null;
     this.connectedMediaElement = null;
   }

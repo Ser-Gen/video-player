@@ -441,7 +441,17 @@ select:focus-visible,
 .volume-wrap {
   width: 140px;
   display: flex;
-  align-items: center;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 4px;
+}
+
+.volume-value {
+  align-self: flex-end;
+  color: var(--text-dim);
+  font-size: 0.72rem;
+  line-height: 1;
+  letter-spacing: 0.04em;
 }
 
 .volume-wrap input,

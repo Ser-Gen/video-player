@@ -1,4 +1,5 @@
 import './styles.css';
+import { MediaAudioGraphController } from './audioGraph';
 import { BrowserMediaPlayerController } from './mediaController';
 import { getAdjacentIndexAfterRemoval, markPlaylistItemPlayed, movePlaylistItem, setCurrentPlaylistItem, type PlaylistItem } from './playlist';
 import { parseM3uPlaylist } from './m3u';
@@ -22,6 +23,7 @@ type MenuName = 'file' | 'view' | 'help' | null;
 type ViewSubmenu = 'preset' | 'cycle' | `preset-category:${string}` | null;
 
 const VOLUME_STORAGE_KEY = 'video-player:volume-settings';
+const MAX_VOLUME_LEVEL = 1.5;
 const CYCLE_INTERVAL_OPTIONS: Array<{ value: PresetCycleIntervalSec; label: string }> = [
   { value: null, label: 'Off' },
   { value: 30, label: '30 sec' },
@@ -108,7 +110,7 @@ function readStoredVolumeSettings(): { volume: number; muted: boolean } | null {
     };
     const volume =
       typeof parsedValue.volume === 'number' && Number.isFinite(parsedValue.volume)
-        ? Math.min(1, Math.max(0, parsedValue.volume))
+        ? Math.min(MAX_VOLUME_LEVEL, Math.max(0, parsedValue.volume))
         : null;
     const muted = typeof parsedValue.muted === 'boolean' ? parsedValue.muted : null;
 
@@ -127,7 +129,7 @@ function writeStoredVolumeSettings(volume: number, muted: boolean): void {
     window.localStorage.setItem(
       VOLUME_STORAGE_KEY,
       JSON.stringify({
-        volume: Math.min(1, Math.max(0, volume)),
+        volume: Math.min(MAX_VOLUME_LEVEL, Math.max(0, volume)),
         muted,
       }),
     );
@@ -443,7 +445,8 @@ function mount(): void {
                     <span id="mute-icon" aria-hidden="true">🔊</span>
                   </button>
                   <label class="volume-wrap" aria-label="Volume">
-                    <input id="volume-input" type="range" min="0" max="100" step="1" value="100" />
+                    <span id="volume-value" class="volume-value">100%</span>
+                    <input id="volume-input" type="range" min="0" max="150" step="1" value="100" />
                   </label>
                 </div>
               </div>
@@ -645,6 +648,7 @@ function mount(): void {
   const muteButton = requireElement(app.querySelector<HTMLButtonElement>('#mute-button'), 'Mute button not found');
   const muteIcon = requireElement(app.querySelector<HTMLElement>('#mute-icon'), 'Mute icon not found');
   const volumeInput = requireElement(app.querySelector<HTMLInputElement>('#volume-input'), 'Volume input not found');
+  const volumeValue = requireElement(app.querySelector<HTMLElement>('#volume-value'), 'Volume value not found');
   const modeSelect = requireElement(app.querySelector<HTMLSelectElement>('#mode-select'), 'Mode select not found');
   const timeline = requireElement(app.querySelector<HTMLDivElement>('#timeline'), 'Timeline not found');
   const timelineBuffered = requireElement(app.querySelector<HTMLDivElement>('#timeline-buffered'), 'Timeline buffered not found');
@@ -696,7 +700,8 @@ function mount(): void {
   const errorBox = requireElement(app.querySelector<HTMLElement>('#error-box'), 'Error box not found');
 
   const controller = new BrowserMediaPlayerController(mediaElement);
-  const visualizer = new ButterchurnVisualizerAdapter(visualizationCanvas);
+  const audioGraph = new MediaAudioGraphController();
+  const visualizer = new ButterchurnVisualizerAdapter(visualizationCanvas, audioGraph);
   const storedVolumeSettings = readStoredVolumeSettings();
   let presetEntries: VisualizationPresetEntry[] = [];
   let presetCategories: VisualizationPresetCategory[] = [];
@@ -722,11 +727,12 @@ function mount(): void {
   let loadedPresetId: string | null = null;
   let sidebarMessage: string | null = null;
   let urlDialogMode: 'open-url' | 'import-playlist-url' = 'open-url';
+  let desiredVolumeLevel = storedVolumeSettings?.volume ?? 1;
+  let volumeSyncToken = 0;
 
-  mediaElement.volume = storedVolumeSettings?.volume ?? 1;
+  mediaElement.volume = Math.min(1, desiredVolumeLevel);
   mediaElement.muted = storedVolumeSettings?.muted ?? false;
   mediaElement.playbackRate = 1;
-  volumeInput.value = `${Math.round((mediaElement.muted ? 0 : mediaElement.volume) * 100)}`;
   playbackRateSelect.value = '1';
   bindCopyButton(copyDiagButton, () => diagOutput.textContent ?? '');
   bindCopyButton(copyLogsButton, () => logsOutput.textContent ?? '');
@@ -775,6 +781,79 @@ function mount(): void {
     }
 
     return source.kind === 'local-file' || isSameOriginRemoteSource(source);
+  }
+
+  function canUseVolumeBoostForSource(source: MediaSourceItem | null): boolean {
+    return source?.kind === 'local-file';
+  }
+
+  function getMaxVolumeForSource(source: MediaSourceItem | null): number {
+    return canUseVolumeBoostForSource(source) ? MAX_VOLUME_LEVEL : 1;
+  }
+
+  function getEffectiveVolumeLevel(state: PlayerState = currentState): number {
+    return Math.min(desiredVolumeLevel, getMaxVolumeForSource(state.source));
+  }
+
+  function getDisplayedVolumeLevel(): number {
+    if (mediaElement.muted) {
+      return 0;
+    }
+
+    const effectiveVolumeLevel = getEffectiveVolumeLevel();
+    if (effectiveVolumeLevel > 1 && mediaElement.volume >= 0.999) {
+      return effectiveVolumeLevel;
+    }
+
+    return mediaElement.volume;
+  }
+
+  function syncVolumeInput(): void {
+    const volumePercent = Math.round(getDisplayedVolumeLevel() * 100);
+    volumeInput.max = `${Math.round(getMaxVolumeForSource(currentState.source) * 100)}`;
+    volumeInput.value = `${volumePercent}`;
+    volumeValue.textContent = `${volumePercent}%`;
+  }
+
+  async function syncVolumeBoostState(state: PlayerState): Promise<void> {
+    const syncToken = ++volumeSyncToken;
+    const effectiveVolumeLevel = getEffectiveVolumeLevel(state);
+    const needsBoost = effectiveVolumeLevel > 1 && canUseVolumeBoostForSource(state.source);
+    const visualizationNeedsAudioGraph = isVisualizationEnabledForCurrentMedia(state) && canUseVisualizationForSource(state.source);
+
+    if (!needsBoost) {
+      if (!visualizationNeedsAudioGraph) {
+        audioGraph.dispose();
+      } else {
+        audioGraph.setGain(1);
+      }
+      syncVolumeInput();
+      return;
+    }
+
+    const supportState = await audioGraph.attachMediaElement(mediaElement);
+    if (syncToken !== volumeSyncToken || currentState.source !== state.source) {
+      return;
+    }
+
+    if (!supportState.supported) {
+      audioGraph.dispose();
+      syncVolumeInput();
+      return;
+    }
+
+    audioGraph.setGain(effectiveVolumeLevel);
+    syncVolumeInput();
+  }
+
+  function applyVolumeLevel(level: number): void {
+    desiredVolumeLevel = Math.min(MAX_VOLUME_LEVEL, Math.max(0, level));
+    const effectiveVolumeLevel = getEffectiveVolumeLevel();
+    mediaElement.volume = Math.min(1, effectiveVolumeLevel);
+    mediaElement.muted = effectiveVolumeLevel === 0;
+    writeStoredVolumeSettings(desiredVolumeLevel, mediaElement.muted);
+    void syncVolumeBoostState(currentState);
+    render(currentState);
   }
 
   async function ensurePresetCatalogLoaded(): Promise<void> {
@@ -1079,6 +1158,7 @@ function mount(): void {
         ? Math.min(1, bufferedEndSec / durationSec)
         : 0;
     timelineBuffered.style.width = `${bufferedRatio * 100}%`;
+    timelineBuffered.style.opacity = bufferedRatio >= 1 ? '0' : '1';
     timelineProgress.style.width = `${playedRatio * 100}%`;
     transportTime.textContent = `${formatTime(state.currentTimeSec)} / ${formatTime(state.durationSec)}`;
 
@@ -1245,6 +1325,8 @@ function mount(): void {
     currentState = state;
     syncVisualizationState(state);
     queuePresetCycleIfNeeded(state);
+    syncVolumeInput();
+    void syncVolumeBoostState(state);
 
     headerFileName.textContent = state.source?.name ?? getCurrentPlaylistItem()?.name ?? 'No source loaded';
     modeSelect.value = state.playbackMode;
@@ -1293,9 +1375,9 @@ function mount(): void {
                 : 'Browser MIME detection is inconclusive for this remote URL. Trying direct browser playback without FFmpeg fallback.'
             : state.browserSupported
               ? state.probeStatus === 'running'
-                ? 'Native browser playback is ready. FFmpeg metadata is still being collected in the background.'
-                : 'Native browser playback is available for this local file. FFmpeg mode can still be forced.'
-              : 'Native browser playback was not detected. FFmpeg fallback is active by default for this local file.';
+                ? 'Native browser playback is ready. FFmpeg metadata is still being collected in the background. Volume can be boosted up to 150% for local files.'
+                : 'Native browser playback is available for this local file. FFmpeg mode can still be forced. Volume can be boosted up to 150% for local files.'
+              : 'Native browser playback was not detected. FFmpeg fallback is active by default for this local file. Volume can be boosted up to 150% for local files.';
 
     errorBox.textContent = state.error ?? sidebarMessage ?? '';
     errorBox.hidden = !(state.error ?? sidebarMessage);
@@ -1657,10 +1739,8 @@ function mount(): void {
   }
 
   function adjustVolume(delta: number): void {
-    const nextVolume = Math.min(1, Math.max(0, (mediaElement.muted ? 0 : mediaElement.volume) + delta));
-    mediaElement.volume = nextVolume;
-    mediaElement.muted = nextVolume === 0;
-    render(currentState);
+    const nextVolume = Math.min(1, Math.max(0, getDisplayedVolumeLevel() + delta));
+    applyVolumeLevel(nextVolume);
   }
 
   function updateHoverFromPointer(clientX: number): void {
@@ -2009,10 +2089,7 @@ function mount(): void {
   });
 
   volumeInput.addEventListener('input', () => {
-    const nextVolume = Number(volumeInput.value) / 100;
-    mediaElement.volume = nextVolume;
-    mediaElement.muted = nextVolume === 0;
-    render(currentState);
+    applyVolumeLevel(Number(volumeInput.value) / 100);
   });
 
   timeline.addEventListener('mousemove', (event) => {
@@ -2049,8 +2126,11 @@ function mount(): void {
   });
 
   mediaElement.addEventListener('volumechange', () => {
-    volumeInput.value = `${Math.round((mediaElement.muted ? 0 : mediaElement.volume) * 100)}`;
-    writeStoredVolumeSettings(mediaElement.volume, mediaElement.muted);
+    if (!mediaElement.muted && mediaElement.volume < 1) {
+      desiredVolumeLevel = mediaElement.volume;
+    }
+    syncVolumeInput();
+    writeStoredVolumeSettings(desiredVolumeLevel, mediaElement.muted);
     render(currentState);
   });
 
@@ -2242,6 +2322,7 @@ function mount(): void {
   window.addEventListener('beforeunload', () => {
     stopPresetCycleTimer();
     visualizer.dispose();
+    audioGraph.dispose();
     controller.dispose();
   });
 

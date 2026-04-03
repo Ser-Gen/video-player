@@ -1,19 +1,27 @@
 import './styles.css';
 import { MediaAudioGraphController } from './audioGraph';
+import { FFmpegService } from './ffmpegService';
 import { BrowserMediaPlayerController } from './mediaController';
 import { getAdjacentIndexAfterRemoval, markPlaylistItemPlayed, movePlaylistItem, setCurrentPlaylistItem, type PlaylistItem } from './playlist';
 import { parseM3uPlaylist } from './m3u';
 import { createHlsPlaylistSource, createLocalFileSource, createRemoteUrlSource, getSourceName, isHlsMimeType } from './sourceUtils';
 import type {
+  AudioExtractOptions,
+  ExportKind,
+  ExportRequest,
+  ExportResult,
   MediaSourceItem,
   PlaybackMode,
   PlayerState,
   PresetCycleIntervalSec,
   RightPanelTab,
+  TrimRange,
+  VideoCodecMode,
+  VideoExportOptions,
   VisualizationSettings,
   VisualizationSupportState,
 } from './types';
-import { formatTime, timelineRatioFromClientX, timelineTimeFromRatio } from './uiHelpers';
+import { clamp, formatTime, timelineRatioFromClientX, timelineTimeFromRatio } from './uiHelpers';
 import { loadVisualizationPresetCatalog } from './visualizationLoader';
 import { pickRandomPresetId, type VisualizationPresetCategory, type VisualizationPresetEntry } from './visualizationPresets';
 import { readStoredVisualizationSettings, writeStoredVisualizationSettings } from './visualizationStorage';
@@ -40,6 +48,31 @@ const PLAYBACK_RATE_OPTIONS = [
 ] as const;
 const SEEK_SHORTCUT_STEP_SEC = 10;
 const VOLUME_SHORTCUT_STEP = 0.1;
+const TRIM_STEP_SEC = 0.1;
+const MIN_EXPORT_DURATION_SEC = 0.1;
+const DEFAULT_EXPORT_CRF = 34;
+const MIN_EXPORT_CRF = 18;
+const MAX_EXPORT_CRF = 40;
+
+type EditorMode = 'view' | 'edit';
+type TrimHandle = 'start' | 'end' | null;
+
+interface EditorState {
+  editorMode: EditorMode;
+  editorSourceReady: boolean;
+  trimStartSec: number;
+  trimEndSec: number;
+  activeTrimHandle: TrimHandle;
+  exportKind: ExportKind;
+  videoCodecMode: VideoCodecMode;
+  includeAudio: boolean;
+  crf: number;
+  exportStatus: 'idle' | 'running' | 'completed' | 'failed' | 'cancelled';
+  exportProgressPercent: number | null;
+  exportProgressText: string;
+  exportResult: ExportResult | null;
+  exportError: string | null;
+}
 
 function requireElement<T extends Element>(value: T | null, message: string): T {
   if (!value) {
@@ -203,6 +236,44 @@ function normalizeMimeTypeInput(value: string): string | null {
   }
 
   return trimmed;
+}
+
+function formatDecimalSeconds(value: number): string {
+  return (Math.round(value * 10) / 10).toFixed(1);
+}
+
+function createInitialEditorState(): EditorState {
+  return {
+    editorMode: 'view',
+    editorSourceReady: false,
+    trimStartSec: 0,
+    trimEndSec: 0,
+    activeTrimHandle: null,
+    exportKind: 'video-mp4',
+    videoCodecMode: 'reencode',
+    includeAudio: true,
+    crf: DEFAULT_EXPORT_CRF,
+    exportStatus: 'idle',
+    exportProgressPercent: null,
+    exportProgressText: '',
+    exportResult: null,
+    exportError: null,
+  };
+}
+
+function normalizeTrimRange(range: TrimRange, durationSec: number | null): TrimRange {
+  const duration = durationSec && durationSec > 0 ? durationSec : 0;
+  const startSec = clamp(range.startSec, 0, duration);
+  const endSec = clamp(range.endSec, startSec, duration);
+  return { startSec, endSec };
+}
+
+function getTrimDurationSec(state: EditorState): number {
+  return Math.max(0, state.trimEndSec - state.trimStartSec);
+}
+
+function isLocalEditableSource(state: PlayerState): state is PlayerState & { source: Extract<MediaSourceItem, { kind: 'local-file' }> } {
+  return state.source?.kind === 'local-file';
 }
 
 type InitPlaylistEntry = {
@@ -411,6 +482,11 @@ function mount(): void {
                   <div id="timeline" class="timeline" role="slider" aria-label="Seek timeline" tabindex="0">
                     <div id="timeline-buffered" class="timeline-buffered"></div>
                     <div id="timeline-progress" class="timeline-progress"></div>
+                    <div id="timeline-trim-mask-start" class="timeline-trim-mask" hidden></div>
+                    <div id="timeline-trim-mask-end" class="timeline-trim-mask" hidden></div>
+                    <div id="timeline-trim-range" class="timeline-trim-range" hidden></div>
+                    <button id="timeline-trim-start-handle" class="timeline-trim-handle" type="button" aria-label="Trim start handle" hidden></button>
+                    <button id="timeline-trim-end-handle" class="timeline-trim-handle" type="button" aria-label="Trim end handle" hidden></button>
                     <div id="timeline-hover-marker" class="timeline-hover-marker" hidden></div>
                     <div id="timeline-tooltip" class="timeline-tooltip" hidden>00:00</div>
                   </div>
@@ -441,6 +517,7 @@ function mount(): void {
                 </div>
 
                 <div class="control-group control-group-right">
+                  <button id="edit-mode-button" class="control-button" type="button" aria-pressed="false">Edit</button>
                   <button id="mute-button" class="control-button icon-button" type="button" aria-label="Mute">
                     <span id="mute-icon" aria-hidden="true">🔊</span>
                   </button>
@@ -450,6 +527,74 @@ function mount(): void {
                   </label>
                 </div>
               </div>
+
+              <section id="editor-panel" class="editor-panel" hidden>
+                <div class="editor-panel-head">
+                  <div>
+                    <h2 class="editor-panel-title">Edit and Export</h2>
+                    <p id="editor-status-text" class="editor-status-text">Select a local file to enable trimming and export.</p>
+                  </div>
+                </div>
+
+                <div class="editor-grid">
+                  <label class="stack-field">
+                    <span class="stack-label">Trim start</span>
+                    <input id="trim-start-input" class="dialog-input" type="number" min="0" step="0.1" value="0.0" />
+                  </label>
+                  <label class="stack-field">
+                    <span class="stack-label">Trim end</span>
+                    <input id="trim-end-input" class="dialog-input" type="number" min="0" step="0.1" value="0.0" />
+                  </label>
+                  <div class="stack-field">
+                    <span class="stack-label">Output duration</span>
+                    <div id="trim-duration-output" class="editor-readonly-value">0.0 sec</div>
+                  </div>
+                </div>
+
+                <div class="editor-grid">
+                  <label class="stack-field">
+                    <span class="stack-label">Export type</span>
+                    <select id="export-kind-select">
+                      <option value="video-mp4">Video MP4</option>
+                      <option value="audio-mp3">Audio MP3</option>
+                      <option value="audio-m4a">Audio M4A</option>
+                    </select>
+                  </label>
+
+                  <label id="video-codec-mode-field" class="stack-field">
+                    <span class="stack-label">Video export mode</span>
+                    <select id="video-codec-mode-select">
+                      <option value="reencode">Web export (re-encode)</option>
+                      <option value="copy-when-possible">Fast trim (copy)</option>
+                    </select>
+                  </label>
+
+                  <label id="include-audio-field" class="checkbox-field">
+                    <input id="include-audio-input" type="checkbox" checked />
+                    <span>Include audio</span>
+                  </label>
+                </div>
+
+                <div id="crf-controls" class="editor-grid">
+                  <label class="stack-field">
+                    <span class="stack-label">CRF</span>
+                    <input id="crf-range-input" type="range" min="18" max="40" step="1" value="34" />
+                  </label>
+                  <label class="stack-field">
+                    <span class="stack-label">CRF value</span>
+                    <input id="crf-number-input" class="dialog-input" type="number" min="18" max="40" step="1" value="34" />
+                  </label>
+                </div>
+
+                <div class="editor-actions">
+                  <button id="export-button" class="control-button accent" type="button">Export</button>
+                  <button id="stop-export-button" class="control-button" type="button" hidden>Stop</button>
+                  <button id="download-export-button" class="control-button" type="button" hidden>Download result</button>
+                </div>
+
+                <p id="export-feedback" class="sidebar-note"></p>
+                <div id="export-result-summary" class="meta-grid" hidden></div>
+              </section>
             </div>
           </div>
         </section>
@@ -686,9 +831,60 @@ function mount(): void {
   const timeline = requireElement(app.querySelector<HTMLDivElement>('#timeline'), 'Timeline not found');
   const timelineBuffered = requireElement(app.querySelector<HTMLDivElement>('#timeline-buffered'), 'Timeline buffered not found');
   const timelineProgress = requireElement(app.querySelector<HTMLDivElement>('#timeline-progress'), 'Timeline progress not found');
+  const timelineTrimMaskStart = requireElement(
+    app.querySelector<HTMLDivElement>('#timeline-trim-mask-start'),
+    'Timeline trim start mask not found',
+  );
+  const timelineTrimMaskEnd = requireElement(
+    app.querySelector<HTMLDivElement>('#timeline-trim-mask-end'),
+    'Timeline trim end mask not found',
+  );
+  const timelineTrimRange = requireElement(app.querySelector<HTMLDivElement>('#timeline-trim-range'), 'Timeline trim range not found');
+  const timelineTrimStartHandle = requireElement(
+    app.querySelector<HTMLButtonElement>('#timeline-trim-start-handle'),
+    'Timeline trim start handle not found',
+  );
+  const timelineTrimEndHandle = requireElement(
+    app.querySelector<HTMLButtonElement>('#timeline-trim-end-handle'),
+    'Timeline trim end handle not found',
+  );
   const timelineHoverMarker = requireElement(app.querySelector<HTMLDivElement>('#timeline-hover-marker'), 'Timeline hover marker not found');
   const timelineTooltip = requireElement(app.querySelector<HTMLDivElement>('#timeline-tooltip'), 'Timeline tooltip not found');
   const transportTime = requireElement(app.querySelector<HTMLElement>('#transport-time'), 'Transport time not found');
+  const editModeButton = requireElement(app.querySelector<HTMLButtonElement>('#edit-mode-button'), 'Edit mode button not found');
+  const editorPanel = requireElement(app.querySelector<HTMLElement>('#editor-panel'), 'Editor panel not found');
+  const editorStatusText = requireElement(app.querySelector<HTMLElement>('#editor-status-text'), 'Editor status text not found');
+  const trimStartInput = requireElement(app.querySelector<HTMLInputElement>('#trim-start-input'), 'Trim start input not found');
+  const trimEndInput = requireElement(app.querySelector<HTMLInputElement>('#trim-end-input'), 'Trim end input not found');
+  const trimDurationOutput = requireElement(app.querySelector<HTMLElement>('#trim-duration-output'), 'Trim duration output not found');
+  const exportKindSelect = requireElement(app.querySelector<HTMLSelectElement>('#export-kind-select'), 'Export kind select not found');
+  const videoCodecModeField = requireElement(
+    app.querySelector<HTMLElement>('#video-codec-mode-field'),
+    'Video codec mode field not found',
+  );
+  const videoCodecModeSelect = requireElement(
+    app.querySelector<HTMLSelectElement>('#video-codec-mode-select'),
+    'Video codec mode select not found',
+  );
+  const includeAudioField = requireElement(app.querySelector<HTMLElement>('#include-audio-field'), 'Include audio field not found');
+  const includeAudioInput = requireElement(app.querySelector<HTMLInputElement>('#include-audio-input'), 'Include audio input not found');
+  const crfControls = requireElement(app.querySelector<HTMLElement>('#crf-controls'), 'CRF controls not found');
+  const crfRangeInput = requireElement(app.querySelector<HTMLInputElement>('#crf-range-input'), 'CRF range input not found');
+  const crfNumberInput = requireElement(app.querySelector<HTMLInputElement>('#crf-number-input'), 'CRF number input not found');
+  const exportButton = requireElement(app.querySelector<HTMLButtonElement>('#export-button'), 'Export button not found');
+  const stopExportButton = requireElement(
+    app.querySelector<HTMLButtonElement>('#stop-export-button'),
+    'Stop export button not found',
+  );
+  const downloadExportButton = requireElement(
+    app.querySelector<HTMLButtonElement>('#download-export-button'),
+    'Download export button not found',
+  );
+  const exportFeedback = requireElement(app.querySelector<HTMLElement>('#export-feedback'), 'Export feedback not found');
+  const exportResultSummary = requireElement(
+    app.querySelector<HTMLDivElement>('#export-result-summary'),
+    'Export result summary not found',
+  );
   const headerFileName = requireElement(app.querySelector<HTMLElement>('#header-file-name'), 'Header source name not found');
   const sidebar = requireElement(app.querySelector<HTMLElement>('#sidebar'), 'Sidebar not found');
   const rightPanelTabs = requireElement(app.querySelector<HTMLElement>('#right-panel-tabs'), 'Right panel tabs not found');
@@ -760,7 +956,8 @@ function mount(): void {
   const supportHint = requireElement(app.querySelector<HTMLElement>('#support-hint'), 'Support hint not found');
   const errorBox = requireElement(app.querySelector<HTMLElement>('#error-box'), 'Error box not found');
 
-  const controller = new BrowserMediaPlayerController(mediaElement);
+  const ffmpegService = new FFmpegService();
+  const controller = new BrowserMediaPlayerController(mediaElement, { ffmpegService });
   const audioGraph = new MediaAudioGraphController();
   const visualizer = new ButterchurnVisualizerAdapter(visualizationCanvas, audioGraph);
   const storedVolumeSettings = readStoredVolumeSettings();
@@ -790,6 +987,10 @@ function mount(): void {
   let urlDialogMode: 'open-url' | 'import-playlist-url' = 'open-url';
   let desiredVolumeLevel = storedVolumeSettings?.volume ?? 1;
   let volumeSyncToken = 0;
+  let editorState: EditorState = createInitialEditorState();
+  let editorSource: MediaSourceItem | null = null;
+  let trimDragHandle: Exclude<TrimHandle, null> | null = null;
+  let ffmpegTrimPreviewTimeoutId: number | null = null;
 
   mediaElement.volume = Math.min(1, desiredVolumeLevel);
   mediaElement.muted = storedVolumeSettings?.muted ?? false;
@@ -798,6 +999,30 @@ function mount(): void {
   bindCopyButton(copyDiagButton, () => diagOutput.textContent ?? '');
   bindCopyButton(copyLogsButton, () => logsOutput.textContent ?? '');
   bindCopyButton(playlistShareCopyButton, () => playlistShareInput.value);
+  ffmpegService.onLog((message) => {
+    if (editorState.exportStatus !== 'running') {
+      return;
+    }
+
+    editorState = {
+      ...editorState,
+      exportProgressText: message,
+    };
+    render(currentState);
+  });
+  ffmpegService.onProgress((progress) => {
+    if (editorState.exportStatus !== 'running') {
+      return;
+    }
+
+    const progressPercent = Math.max(0, Math.min(100, Math.round(progress * 100)));
+    editorState = {
+      ...editorState,
+      exportProgressPercent: progressPercent,
+      exportProgressText: `Processing ${progressPercent}%`,
+    };
+    render(currentState);
+  });
 
   function getSelectedPresetEntry(): VisualizationPresetEntry | null {
     return presetEntries.find((entry) => entry.id === visualizationSettings.selectedPresetId) ?? null;
@@ -1136,6 +1361,226 @@ function mount(): void {
     renderCycleMenu();
   }
 
+  function syncEditorStateForSource(state: PlayerState): void {
+    const sourceChanged = editorSource !== state.source;
+    if (sourceChanged) {
+      if (ffmpegTrimPreviewTimeoutId !== null) {
+        window.clearTimeout(ffmpegTrimPreviewTimeoutId);
+        ffmpegTrimPreviewTimeoutId = null;
+      }
+      editorSource = state.source;
+      editorState = {
+        ...createInitialEditorState(),
+        includeAudio: Boolean(state.mediaInfo?.audio),
+      };
+    }
+
+    const isEditableSource = isLocalEditableSource(state);
+    const durationSec = state.durationSec ?? state.mediaInfo?.durationSec ?? 0;
+    const hasDuration = durationSec > 0;
+    const normalizedTrim = normalizeTrimRange(
+      {
+        startSec: sourceChanged ? 0 : editorState.trimStartSec,
+        endSec: sourceChanged ? durationSec : editorState.trimEndSec || durationSec,
+      },
+      durationSec,
+    );
+
+    const hasAudio = Boolean(state.mediaInfo?.audio);
+    editorState = {
+      ...editorState,
+      editorSourceReady: isEditableSource && hasDuration,
+      trimStartSec: normalizedTrim.startSec,
+      trimEndSec: normalizedTrim.endSec,
+      includeAudio: hasAudio ? editorState.includeAudio : false,
+      exportKind:
+        editorState.exportKind !== 'video-mp4' && !hasAudio
+          ? 'video-mp4'
+          : editorState.exportKind,
+    };
+  }
+
+  function updateEditorState(patch: Partial<EditorState>): void {
+    editorState = {
+      ...editorState,
+      ...patch,
+    };
+    render(currentState);
+  }
+
+  function setTrimRange(range: TrimRange): void {
+    const normalized = normalizeTrimRange(range, currentState.durationSec ?? currentState.mediaInfo?.durationSec ?? null);
+    editorState = {
+      ...editorState,
+      trimStartSec: normalized.startSec,
+      trimEndSec: normalized.endSec,
+      exportError: null,
+    };
+    render(currentState);
+  }
+
+  function canEditCurrentSource(state: PlayerState): boolean {
+    return isLocalEditableSource(state);
+  }
+
+  function getExportRequest(): ExportRequest | null {
+    if (!isLocalEditableSource(currentState)) {
+      return null;
+    }
+
+    const trimRange = {
+      startSec: editorState.trimStartSec,
+      endSec: editorState.trimEndSec,
+    };
+
+    if (editorState.exportKind === 'video-mp4') {
+      return {
+        kind: 'video-mp4',
+        trimRange,
+        codecMode: editorState.videoCodecMode,
+        includeAudio: editorState.includeAudio,
+        crf: editorState.crf,
+      } satisfies VideoExportOptions;
+    }
+
+    return {
+      kind: editorState.exportKind,
+      trimRange,
+    } satisfies AudioExtractOptions;
+  }
+
+  function describeExportResult(result: ExportResult | null): string {
+    if (!result) {
+      return '';
+    }
+
+    return `${result.fileName} • ${formatFileSize(result.blob.size)}`;
+  }
+
+  function getExportSavingsSummary(result: ExportResult | null): {
+    originalSize: string;
+    resultSize: string;
+    savings: string;
+  } | null {
+    if (!result || !isLocalEditableSource(currentState)) {
+      return null;
+    }
+
+    const originalBytes = currentState.source.file.size;
+    const resultBytes = result.blob.size;
+    const savedBytes = Math.max(0, originalBytes - resultBytes);
+    const savedPercent = originalBytes > 0 ? Math.max(0, ((savedBytes / originalBytes) * 100)) : 0;
+
+    return {
+      originalSize: formatFileSize(originalBytes),
+      resultSize: formatFileSize(resultBytes),
+      savings:
+        resultBytes < originalBytes
+          ? `${formatFileSize(savedBytes)} lighter (${savedPercent.toFixed(savedPercent >= 10 ? 0 : 1)}%)`
+          : 'No size reduction',
+    };
+  }
+
+  function describeCurrentExportSettings(): string {
+    const duration = `${formatDecimalSeconds(getTrimDurationSec(editorState))} sec`;
+    if (editorState.exportKind === 'video-mp4') {
+      return editorState.videoCodecMode === 'copy-when-possible'
+        ? `Video MP4, fast trim copy, ${editorState.includeAudio ? 'with audio' : 'without audio'}, ${duration}`
+        : `Video MP4, H.264/AAC, CRF ${editorState.crf}, ${editorState.includeAudio ? 'with audio' : 'without audio'}, ${duration}`;
+    }
+
+    return `${editorState.exportKind === 'audio-mp3' ? 'Audio MP3' : 'Audio M4A'}, ${duration}`;
+  }
+
+  function downloadExportResult(): void {
+    if (!editorState.exportResult) {
+      return;
+    }
+
+    const downloadUrl = URL.createObjectURL(editorState.exportResult.blob);
+    const link = document.createElement('a');
+    link.href = downloadUrl;
+    link.download = editorState.exportResult.fileName;
+    link.click();
+    URL.revokeObjectURL(downloadUrl);
+  }
+
+  async function runExport(): Promise<void> {
+    if (!isLocalEditableSource(currentState)) {
+      return;
+    }
+
+    const exportRequest = getExportRequest();
+    if (!exportRequest) {
+      return;
+    }
+
+    if (!editorState.editorSourceReady || getTrimDurationSec(editorState) < MIN_EXPORT_DURATION_SEC) {
+      updateEditorState({
+        exportStatus: 'failed',
+        exportError: 'Select a valid trim range before exporting.',
+      });
+      return;
+    }
+
+    updateEditorState({
+      exportStatus: 'running',
+      exportProgressPercent: 0,
+      exportProgressText: 'Starting FFmpeg export...',
+      exportError: null,
+      exportResult: editorState.exportResult,
+    });
+
+    try {
+      const result =
+        exportRequest.kind === 'video-mp4'
+          ? await ffmpegService.exportVideo(currentState.source.file, exportRequest)
+          : await ffmpegService.extractAudio(currentState.source.file, exportRequest);
+
+      updateEditorState({
+        exportStatus: 'completed',
+        exportProgressPercent: 100,
+        exportProgressText: 'Export completed.',
+        exportResult: result,
+        exportError: null,
+      });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Export failed.';
+      if (message === 'Export cancelled.') {
+        updateEditorState({
+          exportStatus: 'cancelled',
+          exportProgressPercent: null,
+          exportProgressText: 'Export cancelled.',
+          exportError: null,
+        });
+        return;
+      }
+
+      updateEditorState({
+        exportStatus: 'failed',
+        exportProgressPercent: null,
+        exportError:
+          exportRequest.kind === 'video-mp4' && exportRequest.codecMode === 'copy-when-possible'
+            ? `${message} Try "Web export (re-encode)" if fast trim is unsupported for this file.`
+            : message,
+      });
+    }
+  }
+
+  function stopExport(): void {
+    if (editorState.exportStatus !== 'running') {
+      return;
+    }
+
+    ffmpegService.cancelExport();
+    updateEditorState({
+      exportStatus: 'cancelled',
+      exportProgressPercent: null,
+      exportProgressText: 'Export cancelled.',
+      exportError: null,
+    });
+  }
+
   function renderMediaInfo(state: PlayerState): void {
     if (!state.mediaInfo && state.probeStatus === 'running') {
       mediaInfo.innerHTML = `<div><dt>FFmpeg info</dt><dd>Collecting in background...</dd></div>`;
@@ -1219,10 +1664,31 @@ function mount(): void {
       durationSec > 0 && bufferedEndSec !== null
         ? Math.min(1, bufferedEndSec / durationSec)
         : 0;
+    const trimStartRatio = durationSec > 0 ? editorState.trimStartSec / durationSec : 0;
+    const trimEndRatio = durationSec > 0 ? editorState.trimEndSec / durationSec : 0;
+    const showTrimOverlay = editorState.editorMode === 'edit' && canEditCurrentSource(state) && durationSec > 0;
+
     timelineBuffered.style.width = `${bufferedRatio * 100}%`;
     timelineBuffered.style.opacity = bufferedRatio >= 1 ? '0' : '1';
     timelineProgress.style.width = `${playedRatio * 100}%`;
     transportTime.textContent = `${formatTime(state.currentTimeSec)} / ${formatTime(state.durationSec)}`;
+    timelineTrimMaskStart.hidden = !showTrimOverlay;
+    timelineTrimMaskEnd.hidden = !showTrimOverlay;
+    timelineTrimRange.hidden = !showTrimOverlay;
+    timelineTrimStartHandle.hidden = !showTrimOverlay;
+    timelineTrimEndHandle.hidden = !showTrimOverlay;
+
+    if (showTrimOverlay) {
+      timelineTrimMaskStart.style.width = `${trimStartRatio * 100}%`;
+      timelineTrimMaskEnd.style.left = `${trimEndRatio * 100}%`;
+      timelineTrimMaskEnd.style.width = `${(1 - trimEndRatio) * 100}%`;
+      timelineTrimRange.style.left = `${trimStartRatio * 100}%`;
+      timelineTrimRange.style.width = `${Math.max(0, trimEndRatio - trimStartRatio) * 100}%`;
+      timelineTrimStartHandle.style.left = `${trimStartRatio * 100}%`;
+      timelineTrimEndHandle.style.left = `${trimEndRatio * 100}%`;
+      timelineTrimStartHandle.classList.toggle('timeline-trim-handle--active', editorState.activeTrimHandle === 'start');
+      timelineTrimEndHandle.classList.toggle('timeline-trim-handle--active', editorState.activeTrimHandle === 'end');
+    }
 
     if (hoverTimeSec === null || durationSec <= 0) {
       timelineTooltip.hidden = true;
@@ -1235,6 +1701,86 @@ function mount(): void {
     timelineTooltip.textContent = formatTime(hoverTimeSec);
     timelineTooltip.style.left = `${hoverRatio * 100}%`;
     timelineHoverMarker.style.left = `${hoverRatio * 100}%`;
+  }
+
+  function renderEditorPanel(state: PlayerState): void {
+    const hasAudio = Boolean(state.mediaInfo?.audio);
+    const canEdit = canEditCurrentSource(state);
+    const isVideoExport = editorState.exportKind === 'video-mp4';
+    const durationSec = getTrimDurationSec(editorState);
+    const controlsDisabled = !editorState.editorSourceReady || editorState.exportStatus === 'running';
+
+    editorPanel.hidden = editorState.editorMode !== 'edit';
+    editModeButton.setAttribute('aria-pressed', String(editorState.editorMode === 'edit'));
+    editModeButton.textContent = editorState.editorMode === 'edit' ? 'Edit ✓' : 'Edit';
+    editModeButton.disabled = !canEdit && editorState.editorMode !== 'edit';
+
+    trimStartInput.value = formatDecimalSeconds(editorState.trimStartSec);
+    trimEndInput.value = formatDecimalSeconds(editorState.trimEndSec);
+    trimStartInput.disabled = controlsDisabled;
+    trimEndInput.disabled = controlsDisabled;
+    trimDurationOutput.textContent = `${formatDecimalSeconds(durationSec)} sec`;
+
+    exportKindSelect.value = editorState.exportKind;
+    exportKindSelect.disabled = controlsDisabled || !canEdit;
+    videoCodecModeField.hidden = !isVideoExport;
+    includeAudioField.hidden = !isVideoExport;
+    videoCodecModeSelect.value = editorState.videoCodecMode;
+    videoCodecModeSelect.disabled = controlsDisabled;
+    includeAudioInput.checked = editorState.includeAudio;
+    includeAudioInput.disabled = controlsDisabled || !hasAudio;
+    crfControls.hidden = !isVideoExport || editorState.videoCodecMode !== 'reencode';
+    crfRangeInput.value = `${editorState.crf}`;
+    crfNumberInput.value = `${editorState.crf}`;
+    crfRangeInput.disabled = controlsDisabled || !isVideoExport || editorState.videoCodecMode !== 'reencode';
+    crfNumberInput.disabled = crfRangeInput.disabled;
+
+    const audioExportDisabled = !hasAudio;
+    exportKindSelect.querySelector<HTMLOptionElement>('option[value="audio-mp3"]')!.disabled = audioExportDisabled;
+    exportKindSelect.querySelector<HTMLOptionElement>('option[value="audio-m4a"]')!.disabled = audioExportDisabled;
+
+    exportButton.disabled =
+      controlsDisabled ||
+      !canEdit ||
+      !editorState.editorSourceReady ||
+      durationSec < MIN_EXPORT_DURATION_SEC ||
+      (!hasAudio && editorState.exportKind !== 'video-mp4');
+    stopExportButton.hidden = editorState.exportStatus !== 'running';
+    stopExportButton.disabled = editorState.exportStatus !== 'running';
+    downloadExportButton.hidden = !editorState.exportResult;
+    downloadExportButton.disabled = !editorState.exportResult;
+
+    if (!canEdit) {
+      editorStatusText.textContent = 'Editing is available for local files only.';
+    } else if (!editorState.editorSourceReady) {
+      editorStatusText.textContent = 'Waiting for media duration before enabling trim and export.';
+    } else if (editorState.exportStatus === 'running') {
+      editorStatusText.textContent =
+        editorState.exportProgressPercent !== null
+          ? `Processing ${editorState.exportProgressPercent}%`
+          : editorState.exportProgressText || 'Export in progress...';
+    } else if (editorState.exportStatus === 'cancelled') {
+      editorStatusText.textContent = 'Export cancelled.';
+    } else {
+      editorStatusText.textContent = describeCurrentExportSettings();
+    }
+
+    exportFeedback.textContent =
+      editorState.exportError ??
+      (editorState.exportStatus === 'completed'
+        ? describeExportResult(editorState.exportResult)
+        : editorState.exportProgressText);
+    const savingsSummary = getExportSavingsSummary(editorState.exportResult);
+    exportResultSummary.hidden = !editorState.exportResult;
+    exportResultSummary.innerHTML = editorState.exportResult
+      ? `
+        <div><dt>Result</dt><dd>${escapeHtml(editorState.exportResult.fileName)}</dd></div>
+        <div><dt>Type</dt><dd>${escapeHtml(editorState.exportResult.mimeType)}</dd></div>
+        <div><dt>Original size</dt><dd>${savingsSummary?.originalSize ?? '-'}</dd></div>
+        <div><dt>Result size</dt><dd>${savingsSummary?.resultSize ?? '-'}</dd></div>
+        <div><dt>Savings</dt><dd>${savingsSummary?.savings ?? '-'}</dd></div>
+      `
+      : '';
   }
 
   function renderPlaylist(): void {
@@ -1386,6 +1932,7 @@ function mount(): void {
 
   function render(state: PlayerState): void {
     currentState = state;
+    syncEditorStateForSource(state);
     syncVisualizationState(state);
     queuePresetCycleIfNeeded(state);
     syncVolumeInput();
@@ -1449,6 +1996,7 @@ function mount(): void {
     renderMediaInfo(state);
     renderDiagnostics(state);
     renderTimeline(state);
+    renderEditorPanel(state);
     renderRightPanel();
     renderVisualizationMenu();
   }
@@ -1896,6 +2444,52 @@ function mount(): void {
     renderTimeline(currentState);
   }
 
+  function updateTrimHandleFromPointer(handle: Exclude<TrimHandle, null>, clientX: number): void {
+    const rect = timeline.getBoundingClientRect();
+    const ratio = timelineRatioFromClientX(clientX, rect.left, rect.width);
+    const timeSec = timelineTimeFromRatio(ratio, currentState.durationSec);
+
+    if (handle === 'start') {
+      setTrimRange({
+        startSec: timeSec,
+        endSec: editorState.trimEndSec,
+      });
+      void previewTrimPosition(timeSec);
+      return;
+    }
+
+    setTrimRange({
+      startSec: editorState.trimStartSec,
+      endSec: timeSec,
+    });
+    void previewTrimPosition(timeSec);
+  }
+
+  async function previewTrimPosition(timeSec: number): Promise<void> {
+    if (!currentState.source || currentState.status === 'playing') {
+      return;
+    }
+
+    if (currentState.resolvedEngine === 'browser') {
+      mediaElement.currentTime = timeSec;
+      mediaElement.dispatchEvent(new Event('timeupdate'));
+      return;
+    }
+
+    if (currentState.resolvedEngine !== 'ffmpeg') {
+      return;
+    }
+
+    if (ffmpegTrimPreviewTimeoutId !== null) {
+      window.clearTimeout(ffmpegTrimPreviewTimeoutId);
+    }
+
+    ffmpegTrimPreviewTimeoutId = window.setTimeout(() => {
+      ffmpegTrimPreviewTimeoutId = null;
+      void controller.seek(timeSec);
+    }, 120);
+  }
+
   controller.subscribe(render);
 
   fileMenuButton.addEventListener('click', (event) => {
@@ -2250,6 +2844,144 @@ function mount(): void {
     applyVolumeLevel(Number(volumeInput.value) / 100);
   });
 
+  editModeButton.addEventListener('click', () => {
+    if (editorState.editorMode === 'edit') {
+      updateEditorState({
+        editorMode: 'view',
+        activeTrimHandle: null,
+      });
+      return;
+    }
+
+    updateEditorState({
+      editorMode: 'edit',
+      exportError: null,
+    });
+  });
+
+  trimStartInput.addEventListener('input', () => {
+    setTrimRange({
+      startSec: Number(trimStartInput.value),
+      endSec: editorState.trimEndSec,
+    });
+  });
+
+  trimEndInput.addEventListener('input', () => {
+    setTrimRange({
+      startSec: editorState.trimStartSec,
+      endSec: Number(trimEndInput.value),
+    });
+  });
+
+  exportKindSelect.addEventListener('change', () => {
+    const nextKind = exportKindSelect.value as ExportKind;
+    updateEditorState({
+      exportKind: nextKind,
+      exportError: null,
+    });
+  });
+
+  videoCodecModeSelect.addEventListener('change', () => {
+    updateEditorState({
+      videoCodecMode: videoCodecModeSelect.value as VideoCodecMode,
+      exportError: null,
+    });
+  });
+
+  includeAudioInput.addEventListener('change', () => {
+    updateEditorState({
+      includeAudio: includeAudioInput.checked,
+      exportError: null,
+    });
+  });
+
+  crfRangeInput.addEventListener('input', () => {
+    const nextCrf = clamp(Number(crfRangeInput.value), MIN_EXPORT_CRF, MAX_EXPORT_CRF);
+    updateEditorState({
+      crf: nextCrf,
+      exportError: null,
+    });
+  });
+
+  crfNumberInput.addEventListener('input', () => {
+    const nextCrf = clamp(Number(crfNumberInput.value), MIN_EXPORT_CRF, MAX_EXPORT_CRF);
+    updateEditorState({
+      crf: nextCrf,
+      exportError: null,
+    });
+  });
+
+  exportButton.addEventListener('click', async () => {
+    await runExport();
+  });
+
+  stopExportButton.addEventListener('click', () => {
+    stopExport();
+  });
+
+  downloadExportButton.addEventListener('click', () => {
+    downloadExportResult();
+  });
+
+  function bindTrimHandleEvents(handle: HTMLButtonElement, handleName: Exclude<TrimHandle, null>): void {
+    handle.addEventListener('click', (event) => {
+      event.stopPropagation();
+      updateEditorState({
+        activeTrimHandle: handleName,
+      });
+    });
+
+    handle.addEventListener('mousedown', (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      trimDragHandle = handleName;
+      updateEditorState({
+        activeTrimHandle: handleName,
+      });
+    });
+
+    handle.addEventListener('keydown', (event) => {
+      if (event.key !== 'ArrowLeft' && event.key !== 'ArrowRight') {
+        return;
+      }
+
+      event.preventDefault();
+      event.stopPropagation();
+      const delta = event.key === 'ArrowLeft' ? -TRIM_STEP_SEC : TRIM_STEP_SEC;
+      if (handleName === 'start') {
+        setTrimRange({
+          startSec: editorState.trimStartSec + delta,
+          endSec: editorState.trimEndSec,
+        });
+        void previewTrimPosition(editorState.trimStartSec + delta);
+      } else {
+        setTrimRange({
+          startSec: editorState.trimStartSec,
+          endSec: editorState.trimEndSec + delta,
+        });
+        void previewTrimPosition(editorState.trimEndSec + delta);
+      }
+      updateEditorState({
+        activeTrimHandle: handleName,
+      });
+    });
+  }
+
+  bindTrimHandleEvents(timelineTrimStartHandle, 'start');
+  bindTrimHandleEvents(timelineTrimEndHandle, 'end');
+
+  document.addEventListener('mousemove', (event) => {
+    if (!trimDragHandle) {
+      return;
+    }
+
+    updateTrimHandleFromPointer(trimDragHandle, event.clientX);
+  });
+
+  document.addEventListener('mouseup', () => {
+    trimDragHandle = null;
+  });
+
   timeline.addEventListener('mousemove', (event) => {
     updateHoverFromPointer(event.clientX);
   });
@@ -2260,6 +2992,9 @@ function mount(): void {
   });
 
   timeline.addEventListener('click', async (event) => {
+    if ((event.target as HTMLElement).closest('.timeline-trim-handle')) {
+      return;
+    }
     updateHoverFromPointer(event.clientX);
     if (hoverTimeSec !== null) {
       await controller.seek(hoverTimeSec);

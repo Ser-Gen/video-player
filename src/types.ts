@@ -59,6 +59,35 @@ export interface MediaInfo {
   rawLog: string;
 }
 
+export interface TrimRange {
+  startSec: number;
+  endSec: number;
+}
+
+export type ExportKind = 'video-mp4' | 'audio-mp3' | 'audio-m4a';
+export type VideoCodecMode = 'reencode' | 'copy-when-possible';
+
+export interface VideoExportOptions {
+  kind: 'video-mp4';
+  trimRange: TrimRange;
+  codecMode: VideoCodecMode;
+  includeAudio: boolean;
+  crf: number;
+}
+
+export interface AudioExtractOptions {
+  kind: 'audio-mp3' | 'audio-m4a';
+  trimRange: TrimRange;
+}
+
+export type ExportRequest = VideoExportOptions | AudioExtractOptions;
+
+export interface ExportResult {
+  blob: Blob;
+  mimeType: string;
+  fileName: string;
+}
+
 export interface LocalFileMediaSource {
   kind: 'local-file';
   name: string;

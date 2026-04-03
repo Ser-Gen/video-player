@@ -334,10 +334,13 @@ select:focus-visible,
   background: #1d1f23;
   border: 1px solid var(--border);
   cursor: pointer;
+  overflow: visible;
 }
 
 .timeline-buffered,
-.timeline-progress {
+.timeline-progress,
+.timeline-trim-mask,
+.timeline-trim-range {
   position: absolute;
   inset: 0 auto 0 0;
   height: 100%;
@@ -350,6 +353,39 @@ select:focus-visible,
 
 .timeline-progress {
   background: var(--accent);
+}
+
+.timeline-trim-mask {
+  background: rgba(0, 0, 0, 0.42);
+  z-index: 2;
+  pointer-events: none;
+}
+
+.timeline-trim-range {
+  background: rgba(255, 122, 26, 0.22);
+  border-left: 1px solid rgba(255, 122, 26, 0.72);
+  border-right: 1px solid rgba(255, 122, 26, 0.72);
+  z-index: 3;
+  pointer-events: none;
+}
+
+.timeline-trim-handle {
+  position: absolute;
+  top: 50%;
+  width: 12px;
+  height: 22px;
+  min-height: 22px;
+  padding: 0;
+  border: 1px solid var(--accent);
+  background: #fff4ea;
+  transform: translate(-50%, -50%);
+  z-index: 4;
+}
+
+.timeline-trim-handle:hover,
+.timeline-trim-handle--active {
+  background: var(--accent);
+  color: #111;
 }
 
 .timeline-hover-marker {
@@ -383,6 +419,62 @@ select:focus-visible,
   gap: 10px 16px;
   padding: 10px 12px 12px;
   background: transparent;
+}
+
+.editor-panel {
+  border-top: 1px solid var(--border);
+  background: linear-gradient(180deg, rgba(11, 11, 12, 0.98), rgba(19, 20, 24, 0.98));
+  padding: 14px 16px 16px;
+  display: grid;
+  gap: 14px;
+}
+
+.editor-panel-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.editor-panel-title {
+  margin: 0;
+  font-size: 1rem;
+}
+
+.editor-status-text {
+  margin: 4px 0 0;
+}
+
+.editor-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.editor-readonly-value {
+  min-height: 40px;
+  display: flex;
+  align-items: center;
+  padding: 0 12px;
+  border: 1px solid var(--border);
+  background: var(--bg-elevated);
+}
+
+.checkbox-field {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 40px;
+  margin: 0;
+}
+
+.checkbox-field input {
+  margin: 0;
+}
+
+.editor-actions {
+  display: flex;
+  gap: 10px;
 }
 
 .control-group {
@@ -751,6 +843,16 @@ dd {
 
 .share-warning-list li + li {
   margin-top: 4px;
+}
+
+@media (max-width: 880px) {
+  .editor-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .editor-actions {
+    flex-direction: column;
+  }
 }
 
 @keyframes spin {

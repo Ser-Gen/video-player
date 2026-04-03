@@ -1,13 +1,16 @@
 import { FFmpeg } from '@ffmpeg/ffmpeg';
 import { fetchFile, toBlobURL } from '@ffmpeg/util';
 import { parseMediaInfoFromLogs } from './ffmpegLogParser';
-import type { MediaInfo } from './types';
+import type { AudioExtractOptions, ExportResult, MediaInfo, VideoExportOptions } from './types';
 
 const INPUT_FILE = '/input';
 const OUTPUT_FILE = '/output.mp4';
+const OUTPUT_AUDIO_MP3_FILE = '/output.mp3';
+const OUTPUT_AUDIO_M4A_FILE = '/output.m4a';
 const SEGMENT_LENGTH_SEC = 20;
 const OUTPUT_MIME = 'video/mp4; codecs="avc1.42E01E, mp4a.40.2"';
 const OUTPUT_AUDIO_MIME = 'audio/mp4; codecs="mp4a.40.2"';
+const MP3_MIME = 'audio/mpeg';
 
 export interface TranscodeResult {
   blob: Blob;
@@ -20,12 +23,21 @@ export class FFmpegService {
   private ffmpeg: FFmpeg | null = null;
   private loadPromise: Promise<void> | null = null;
   private logListeners = new Set<(message: string) => void>();
+  private progressListeners = new Set<(progress: number) => void>();
   private currentLogs: string[] = [];
+  private exportAbortController: AbortController | null = null;
 
   onLog(listener: (message: string) => void): () => void {
     this.logListeners.add(listener);
     return () => {
       this.logListeners.delete(listener);
+    };
+  }
+
+  onProgress(listener: (progress: number) => void): () => void {
+    this.progressListeners.add(listener);
+    return () => {
+      this.progressListeners.delete(listener);
     };
   }
 
@@ -46,6 +58,11 @@ export class FFmpegService {
       this.currentLogs.push(message);
       for (const listener of this.logListeners) {
         listener(message);
+      }
+    });
+    ffmpeg.on('progress', ({ progress }) => {
+      for (const listener of this.progressListeners) {
+        listener(progress);
       }
     });
 
@@ -169,6 +186,145 @@ export class FFmpegService {
     }
   }
 
+  async exportVideo(file: File, request: VideoExportOptions): Promise<ExportResult> {
+    await this.load();
+    this.resetLogs();
+    const ffmpeg = this.instance;
+
+    await this.writeInput(file);
+    await this.safeDelete(OUTPUT_FILE);
+
+    const durationSec = Math.max(0.1, request.trimRange.endSec - request.trimRange.startSec);
+    const args = [
+      '-hide_banner',
+      '-ss',
+      `${Math.max(0, request.trimRange.startSec)}`,
+      '-i',
+      INPUT_FILE,
+      '-t',
+      `${durationSec}`,
+      '-max_muxing_queue_size',
+      '4096',
+      '-map',
+      '0:v:0',
+    ];
+
+    if (request.includeAudio) {
+      args.push('-map', '0:a?');
+    }
+
+    if (request.codecMode === 'copy-when-possible') {
+      args.push('-c:v', 'copy');
+      if (request.includeAudio) {
+        args.push('-c:a', 'copy');
+      } else {
+        args.push('-an');
+      }
+      args.push('-movflags', '+faststart', OUTPUT_FILE);
+    } else {
+      args.push(
+        '-c:v',
+        'libx264',
+        '-preset',
+        'fast',
+        '-crf',
+        `${request.crf}`,
+        '-pix_fmt',
+        'yuv420p',
+      );
+      if (request.includeAudio) {
+        args.push('-c:a', 'aac', '-b:a', '128k');
+      } else {
+        args.push('-an');
+      }
+      args.push('-movflags', 'faststart', OUTPUT_FILE);
+    }
+
+    try {
+      const abortController = new AbortController();
+      this.exportAbortController = abortController;
+      await ffmpeg.exec(args, -1, { signal: abortController.signal });
+      const blob = await this.readOutputBlob(OUTPUT_FILE, 'video/mp4');
+      return {
+        blob,
+        mimeType: 'video/mp4',
+        fileName: this.buildOutputFileName(file.name, request),
+      };
+    } catch (error) {
+      if (this.isAbortError(error)) {
+        throw new Error('Export cancelled.');
+      }
+      throw error;
+    } finally {
+      this.exportAbortController = null;
+      await this.cleanupTempFiles(INPUT_FILE, OUTPUT_FILE);
+    }
+  }
+
+  async extractAudio(file: File, request: AudioExtractOptions): Promise<ExportResult> {
+    await this.load();
+    this.resetLogs();
+    const ffmpeg = this.instance;
+
+    const outputFile = request.kind === 'audio-mp3' ? OUTPUT_AUDIO_MP3_FILE : OUTPUT_AUDIO_M4A_FILE;
+    const mimeType = request.kind === 'audio-mp3' ? MP3_MIME : 'audio/mp4';
+    const durationSec = Math.max(0.1, request.trimRange.endSec - request.trimRange.startSec);
+
+    await this.writeInput(file);
+    await this.safeDelete(outputFile);
+
+    const args = [
+      '-hide_banner',
+      '-ss',
+      `${Math.max(0, request.trimRange.startSec)}`,
+      '-i',
+      INPUT_FILE,
+      '-t',
+      `${durationSec}`,
+      '-vn',
+      '-map',
+      '0:a:0',
+    ];
+
+    if (request.kind === 'audio-mp3') {
+      args.push('-c:a', 'libmp3lame', '-b:a', '192k', outputFile);
+    } else {
+      args.push('-c:a', 'aac', '-b:a', '192k', '-f', 'ipod', outputFile);
+    }
+
+    try {
+      const abortController = new AbortController();
+      this.exportAbortController = abortController;
+      await ffmpeg.exec(args, -1, { signal: abortController.signal });
+      const blob = await this.readOutputBlob(outputFile, mimeType);
+      return {
+        blob,
+        mimeType,
+        fileName: this.buildOutputFileName(file.name, request),
+      };
+    } catch (error) {
+      if (this.isAbortError(error)) {
+        throw new Error('Export cancelled.');
+      }
+      throw error;
+    } finally {
+      this.exportAbortController = null;
+      await this.cleanupTempFiles(INPUT_FILE, outputFile);
+    }
+  }
+
+  cancelExport(): void {
+    this.exportAbortController?.abort();
+
+    if (this.ffmpeg) {
+      this.ffmpeg.terminate();
+    }
+
+    this.ffmpeg = null;
+    this.loadPromise = null;
+    this.exportAbortController = null;
+  }
+
   private async writeInput(file: File): Promise<void> {
     const ffmpeg = this.instance;
     await this.safeDelete(INPUT_FILE);
@@ -180,6 +336,10 @@ export class FFmpegService {
   }
 
   private async safeDelete(path: string): Promise<void> {
+    if (!this.ffmpeg) {
+      return;
+    }
+
     try {
       await this.instance.deleteFile(path);
     } catch {
@@ -189,5 +349,38 @@ export class FFmpegService {
 
   private async cleanupTempFiles(...paths: string[]): Promise<void> {
     await Promise.all(paths.map((path) => this.safeDelete(path)));
+  }
+
+  private async readOutputBlob(path: string, mimeType: string): Promise<Blob> {
+    const bytes = await this.instance.readFile(path);
+    const blobPayload =
+      typeof bytes === 'string'
+        ? new TextEncoder().encode(bytes)
+        : (() => {
+            const copy = new Uint8Array(bytes.byteLength);
+            copy.set(bytes);
+            return copy.buffer;
+          })();
+
+    return new Blob([blobPayload], { type: mimeType });
+  }
+
+  private buildOutputFileName(sourceName: string, request: VideoExportOptions | AudioExtractOptions): string {
+    const baseName = sourceName.replace(/\.[^.]+$/, '');
+
+    if (request.kind === 'video-mp4') {
+      return request.codecMode === 'copy-when-possible'
+        ? `${baseName}.trim-copy.mp4`
+        : `${baseName}.web.crf${request.crf}.mp4`;
+    }
+
+    return request.kind === 'audio-mp3' ? `${baseName}.audio.mp3` : `${baseName}.audio.m4a`;
+  }
+
+  private isAbortError(error: unknown): boolean {
+    return error instanceof DOMException
+      ? error.name === 'AbortError'
+      : error instanceof Error &&
+          (error.message.toLowerCase().includes('abort') || error.message.toLowerCase().includes('terminate'));
   }
 }

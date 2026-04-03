@@ -1,5 +1,46 @@
-import { waitFor } from '@testing-library/dom';
+import { fireEvent, waitFor } from '@testing-library/dom';
 import userEvent from '@testing-library/user-event';
+
+const ffmpegServiceMocks = vi.hoisted(() => ({
+  probe: vi.fn(async (..._args: unknown[]) => ({
+    container: 'mp4',
+    durationSec: 120,
+    bitrate: '1 Mbps',
+    video: { codec: 'h264', width: 1280, height: 720, fps: 24 },
+    audio: { codec: 'aac', sampleRate: 48000, channelLayout: 'stereo' },
+    rawLog: 'mock log',
+  })),
+  transcodeFrom: vi.fn(async (..._args: unknown[]) => ({
+    blob: new Blob(['segment'], { type: 'video/mp4' }),
+    mimeType: 'video/mp4',
+    mediaInfo: {
+      container: 'mp4',
+      durationSec: 120,
+      bitrate: '1 Mbps',
+      video: { codec: 'h264', width: 1280, height: 720, fps: 24 },
+      audio: { codec: 'aac', sampleRate: 48000, channelLayout: 'stereo' },
+      rawLog: 'mock log',
+    },
+    segmentDurationSec: 20,
+  })),
+  exportVideo: vi.fn(async (...args: unknown[]) => {
+    const request = args[1] as { codecMode: string; crf: number };
+    return {
+    blob: new Blob(['video export'], { type: 'video/mp4' }),
+    mimeType: 'video/mp4',
+    fileName: request.codecMode === 'copy-when-possible' ? 'clip.trim-copy.mp4' : `clip.web.crf${request.crf}.mp4`,
+    };
+  }),
+  extractAudio: vi.fn(async (...args: unknown[]) => {
+    const request = args[1] as { kind: string };
+    return {
+    blob: new Blob(['audio export'], { type: request.kind === 'audio-mp3' ? 'audio/mpeg' : 'audio/mp4' }),
+    mimeType: request.kind === 'audio-mp3' ? 'audio/mpeg' : 'audio/mp4',
+    fileName: request.kind === 'audio-mp3' ? 'clip.audio.mp3' : 'clip.audio.m4a',
+    };
+  }),
+  cancelExport: vi.fn(),
+}));
 
 interface MainMockOptions {
   supported?: boolean;
@@ -127,6 +168,59 @@ async function loadMain(options?: MainMockOptions) {
     },
   }));
 
+  vi.doMock('./ffmpegService', () => ({
+    FFmpegService: class {
+      private listeners = new Set<(message: string) => void>();
+      private progressListeners = new Set<(progress: number) => void>();
+
+      onLog(listener: (message: string) => void) {
+        this.listeners.add(listener);
+        return () => {
+          this.listeners.delete(listener);
+        };
+      }
+
+      onProgress(listener: (progress: number) => void) {
+        this.progressListeners.add(listener);
+        return () => {
+          this.progressListeners.delete(listener);
+        };
+      }
+
+      async probe(file: File) {
+        return ffmpegServiceMocks.probe(file);
+      }
+
+      async transcodeFrom(file: File, startTimeSec: number, isAudioOnly: boolean) {
+        return ffmpegServiceMocks.transcodeFrom(file, startTimeSec, isAudioOnly);
+      }
+
+      async exportVideo(file: File, request: unknown) {
+        for (const listener of this.progressListeners) {
+          listener(0.42);
+        }
+        for (const listener of this.listeners) {
+          listener('Exporting video');
+        }
+        return ffmpegServiceMocks.exportVideo(file, request);
+      }
+
+      async extractAudio(file: File, request: unknown) {
+        for (const listener of this.progressListeners) {
+          listener(0.42);
+        }
+        for (const listener of this.listeners) {
+          listener('Extracting audio');
+        }
+        return ffmpegServiceMocks.extractAudio(file, request);
+      }
+
+      cancelExport() {
+        ffmpegServiceMocks.cancelExport();
+      }
+    },
+  }));
+
   await import('./main');
 }
 
@@ -142,6 +236,11 @@ describe('main ui', () => {
     setLocationSearch('');
     vi.resetModules();
     vi.clearAllMocks();
+    ffmpegServiceMocks.probe.mockClear();
+    ffmpegServiceMocks.transcodeFrom.mockClear();
+    ffmpegServiceMocks.exportVideo.mockClear();
+    ffmpegServiceMocks.extractAudio.mockClear();
+    ffmpegServiceMocks.cancelExport.mockClear();
     vi.stubGlobal('fetch', vi.fn());
   });
 
@@ -496,6 +595,160 @@ describe('main ui', () => {
       expect(timelineBuffered.style.width).toBe('100%');
       expect(timelineBuffered.style.opacity).toBe('0');
     });
+  });
+
+  it('shows edit controls for local files and keeps them hidden until edit mode is enabled', async () => {
+    await loadMain();
+
+    const videoInput = document.querySelector<HTMLInputElement>('#open-file-input')!;
+    const editorPanel = document.querySelector<HTMLElement>('#editor-panel')!;
+    const editButton = document.querySelector<HTMLButtonElement>('#edit-mode-button')!;
+
+    expect(editorPanel.hidden).toBe(true);
+
+    await userEvent.upload(videoInput, new File(['123456'], 'clip.mp4', { type: 'video/mp4' }));
+    await waitFor(() => {
+      expect(editButton.disabled).toBe(false);
+    });
+
+    await userEvent.click(editButton);
+
+    expect(editorPanel.hidden).toBe(false);
+    expect(document.querySelector<HTMLInputElement>('#trim-start-input')?.value).toBe('0.0');
+    expect(document.querySelector<HTMLInputElement>('#trim-end-input')?.value).toBe('120.0');
+  });
+
+  it('syncs drag handles and numeric trim inputs in edit mode', async () => {
+    await loadMain();
+
+    const videoInput = document.querySelector<HTMLInputElement>('#open-file-input')!;
+    const mediaElement = document.querySelector<HTMLVideoElement>('#media-element')!;
+    Object.defineProperty(mediaElement, 'currentTime', {
+      configurable: true,
+      writable: true,
+      value: 0,
+    });
+    await userEvent.upload(videoInput, new File(['123456'], 'clip.mp4', { type: 'video/mp4' }));
+    await userEvent.click(document.querySelector<HTMLButtonElement>('#play-toggle-button')!);
+    await userEvent.click(document.querySelector<HTMLButtonElement>('#edit-mode-button')!);
+
+    const timeline = document.querySelector<HTMLDivElement>('#timeline')!;
+    const startHandle = document.querySelector<HTMLButtonElement>('#timeline-trim-start-handle')!;
+    const trimStartInput = document.querySelector<HTMLInputElement>('#trim-start-input')!;
+    const trimEndInput = document.querySelector<HTMLInputElement>('#trim-end-input')!;
+
+    vi.spyOn(timeline, 'getBoundingClientRect').mockReturnValue({
+      x: 0,
+      y: 0,
+      width: 200,
+      height: 12,
+      top: 0,
+      right: 200,
+      bottom: 12,
+      left: 0,
+      toJSON: () => ({}),
+    } as DOMRect);
+
+    fireEvent.mouseDown(startHandle, { clientX: 0 });
+    fireEvent.mouseMove(document, { clientX: 50 });
+    fireEvent.mouseUp(document);
+
+    await waitFor(() => {
+      expect(trimStartInput.value).toBe('30.0');
+    });
+
+    trimEndInput.value = '20';
+    trimEndInput.dispatchEvent(new Event('input', { bubbles: true }));
+
+    expect(trimStartInput.value).toBe('30.0');
+    expect(trimEndInput.value).toBe('30.0');
+  });
+
+  it('exports and shows a downloadable result in edit mode', async () => {
+    type DeferredExportResult = { blob: Blob; mimeType: string; fileName: string };
+    const deferred: { resolve: ((value: DeferredExportResult) => void) | null } = { resolve: null };
+    ffmpegServiceMocks.extractAudio.mockImplementationOnce(
+      () =>
+        new Promise<DeferredExportResult>((resolve) => {
+          deferred.resolve = resolve;
+        }),
+    );
+
+    await loadMain();
+
+    Object.defineProperty(URL, 'createObjectURL', {
+      configurable: true,
+      value: vi.fn(() => 'blob:export-result'),
+    });
+    Object.defineProperty(URL, 'revokeObjectURL', {
+      configurable: true,
+      value: vi.fn(),
+    });
+    const createObjectUrlSpy = vi.mocked(URL.createObjectURL);
+    const revokeObjectUrlSpy = vi.mocked(URL.revokeObjectURL);
+    const clickSpy = vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(() => undefined);
+
+    const videoInput = document.querySelector<HTMLInputElement>('#open-file-input')!;
+    await userEvent.upload(videoInput, new File(['123456'], 'clip.mp4', { type: 'video/mp4' }));
+    await userEvent.click(document.querySelector<HTMLButtonElement>('#edit-mode-button')!);
+
+    const exportKindSelect = document.querySelector<HTMLSelectElement>('#export-kind-select')!;
+    exportKindSelect.value = 'audio-mp3';
+    exportKindSelect.dispatchEvent(new Event('change', { bubbles: true }));
+
+    await userEvent.click(document.querySelector<HTMLButtonElement>('#export-button')!);
+
+    await waitFor(() => {
+      expect(document.querySelector<HTMLElement>('#editor-status-text')?.textContent).toContain('Processing 42%');
+    });
+
+    if (!deferred.resolve) {
+      throw new Error('Deferred export resolver was not set');
+    }
+    deferred.resolve({
+      blob: new Blob(['audio export'], { type: 'audio/mpeg' }),
+      mimeType: 'audio/mpeg',
+      fileName: 'clip.audio.mp3',
+    });
+
+    await waitFor(() => {
+      expect(ffmpegServiceMocks.extractAudio).toHaveBeenCalled();
+      expect(document.querySelector<HTMLButtonElement>('#download-export-button')?.hidden).toBe(false);
+      expect(document.querySelector<HTMLElement>('#export-result-summary')?.textContent).toContain('clip.audio.mp3');
+      expect(document.querySelector<HTMLElement>('#export-result-summary')?.textContent).toContain('Original size');
+    });
+
+    await userEvent.click(document.querySelector<HTMLButtonElement>('#download-export-button')!);
+
+    expect(createObjectUrlSpy).toHaveBeenCalled();
+    expect(clickSpy).toHaveBeenCalled();
+    expect(revokeObjectUrlSpy).toHaveBeenCalled();
+  });
+
+  it('allows stopping the current export', async () => {
+    ffmpegServiceMocks.exportVideo.mockImplementationOnce(
+      () =>
+        new Promise((_resolve) => {
+          // Keep pending so the stop button remains visible.
+        }),
+    );
+
+    await loadMain();
+
+    const videoInput = document.querySelector<HTMLInputElement>('#open-file-input')!;
+    await userEvent.upload(videoInput, new File(['123456'], 'clip.mp4', { type: 'video/mp4' }));
+    await userEvent.click(document.querySelector<HTMLButtonElement>('#edit-mode-button')!);
+    await userEvent.click(document.querySelector<HTMLButtonElement>('#export-button')!);
+
+    await waitFor(() => {
+      expect(document.querySelector<HTMLButtonElement>('#stop-export-button')?.hidden).toBe(false);
+    });
+
+    await userEvent.click(document.querySelector<HTMLButtonElement>('#stop-export-button')!);
+
+    expect(ffmpegServiceMocks.cancelExport).toHaveBeenCalled();
+    expect(document.querySelector<HTMLElement>('#editor-status-text')?.textContent).toContain('Export cancelled');
+    expect(document.querySelector<HTMLElement>('#export-feedback')?.textContent).toContain('Export cancelled');
   });
 
   it('toggles playback when the visualization canvas is clicked', async () => {

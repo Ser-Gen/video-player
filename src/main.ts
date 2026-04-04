@@ -18,6 +18,7 @@ import type {
   TrimRange,
   VideoCodecMode,
   VideoExportOptions,
+  VideoResolutionPreset,
   VisualizationSettings,
   VisualizationSupportState,
 } from './types';
@@ -65,6 +66,7 @@ interface EditorState {
   activeTrimHandle: TrimHandle;
   exportKind: ExportKind;
   videoCodecMode: VideoCodecMode;
+  targetResolution: VideoResolutionPreset;
   includeAudio: boolean;
   crf: number;
   exportStatus: 'idle' | 'running' | 'completed' | 'failed' | 'cancelled';
@@ -251,6 +253,7 @@ function createInitialEditorState(): EditorState {
     activeTrimHandle: null,
     exportKind: 'video-mp4',
     videoCodecMode: 'reencode',
+    targetResolution: 'original',
     includeAudio: true,
     crf: DEFAULT_EXPORT_CRF,
     exportStatus: 'idle',
@@ -569,6 +572,16 @@ function mount(): void {
                     </select>
                   </label>
 
+                  <label id="video-resolution-field" class="stack-field">
+                    <span class="stack-label">Resolution preset</span>
+                    <select id="video-resolution-select">
+                      <option value="original">Original</option>
+                      <option value="1080p">1080p</option>
+                      <option value="720p">720p</option>
+                      <option value="480p">480p</option>
+                    </select>
+                  </label>
+
                   <label id="include-audio-field" class="checkbox-field">
                     <input id="include-audio-input" type="checkbox" checked />
                     <span>Include audio</span>
@@ -865,6 +878,14 @@ function mount(): void {
   const videoCodecModeSelect = requireElement(
     app.querySelector<HTMLSelectElement>('#video-codec-mode-select'),
     'Video codec mode select not found',
+  );
+  const videoResolutionField = requireElement(
+    app.querySelector<HTMLElement>('#video-resolution-field'),
+    'Video resolution field not found',
+  );
+  const videoResolutionSelect = requireElement(
+    app.querySelector<HTMLSelectElement>('#video-resolution-select'),
+    'Video resolution select not found',
   );
   const includeAudioField = requireElement(app.querySelector<HTMLElement>('#include-audio-field'), 'Include audio field not found');
   const includeAudioInput = requireElement(app.querySelector<HTMLInputElement>('#include-audio-input'), 'Include audio input not found');
@@ -1440,6 +1461,7 @@ function mount(): void {
         codecMode: editorState.videoCodecMode,
         includeAudio: editorState.includeAudio,
         crf: editorState.crf,
+        targetResolution: editorState.targetResolution,
       } satisfies VideoExportOptions;
     }
 
@@ -1486,7 +1508,7 @@ function mount(): void {
     if (editorState.exportKind === 'video-mp4') {
       return editorState.videoCodecMode === 'copy-when-possible'
         ? `Video MP4, fast trim copy, ${editorState.includeAudio ? 'with audio' : 'without audio'}, ${duration}`
-        : `Video MP4, H.264/AAC, CRF ${editorState.crf}, ${editorState.includeAudio ? 'with audio' : 'without audio'}, ${duration}`;
+        : `Video MP4, H.264/AAC, CRF ${editorState.crf}, ${editorState.targetResolution === 'original' ? 'original resolution' : editorState.targetResolution}, ${editorState.includeAudio ? 'with audio' : 'without audio'}, ${duration}`;
     }
 
     return `${editorState.exportKind === 'audio-mp3' ? 'Audio MP3' : 'Audio M4A'}, ${duration}`;
@@ -1724,9 +1746,12 @@ function mount(): void {
     exportKindSelect.value = editorState.exportKind;
     exportKindSelect.disabled = controlsDisabled || !canEdit;
     videoCodecModeField.hidden = !isVideoExport;
+    videoResolutionField.hidden = !isVideoExport;
     includeAudioField.hidden = !isVideoExport;
     videoCodecModeSelect.value = editorState.videoCodecMode;
     videoCodecModeSelect.disabled = controlsDisabled;
+    videoResolutionSelect.value = editorState.targetResolution;
+    videoResolutionSelect.disabled = controlsDisabled || !isVideoExport || editorState.videoCodecMode !== 'reencode';
     includeAudioInput.checked = editorState.includeAudio;
     includeAudioInput.disabled = controlsDisabled || !hasAudio;
     crfControls.hidden = !isVideoExport || editorState.videoCodecMode !== 'reencode';
@@ -2884,6 +2909,13 @@ function mount(): void {
   videoCodecModeSelect.addEventListener('change', () => {
     updateEditorState({
       videoCodecMode: videoCodecModeSelect.value as VideoCodecMode,
+      exportError: null,
+    });
+  });
+
+  videoResolutionSelect.addEventListener('change', () => {
+    updateEditorState({
+      targetResolution: videoResolutionSelect.value as VideoResolutionPreset,
       exportError: null,
     });
   });

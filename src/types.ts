@@ -66,6 +66,7 @@ export interface TrimRange {
 
 export type ExportKind = 'video-mp4' | 'audio-mp3' | 'audio-m4a';
 export type VideoCodecMode = 'reencode' | 'copy-when-possible';
+export type VideoResolutionPreset = 'original' | '1080p' | '720p' | '480p';
 
 export interface VideoExportOptions {
   kind: 'video-mp4';
@@ -73,6 +74,7 @@ export interface VideoExportOptions {
   codecMode: VideoCodecMode;
   includeAudio: boolean;
   crf: number;
+  targetResolution: VideoResolutionPreset;
 }
 
 export interface AudioExtractOptions {

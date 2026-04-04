@@ -1,7 +1,7 @@
 import { FFmpeg } from '@ffmpeg/ffmpeg';
 import { fetchFile, toBlobURL } from '@ffmpeg/util';
 import { parseMediaInfoFromLogs } from './ffmpegLogParser';
-import type { AudioExtractOptions, ExportResult, MediaInfo, VideoExportOptions } from './types';
+import type { AudioExtractOptions, ExportResult, MediaInfo, VideoExportOptions, VideoResolutionPreset } from './types';
 
 const INPUT_FILE = '/input';
 const OUTPUT_FILE = '/output.mp4';
@@ -11,6 +11,12 @@ const SEGMENT_LENGTH_SEC = 20;
 const OUTPUT_MIME = 'video/mp4; codecs="avc1.42E01E, mp4a.40.2"';
 const OUTPUT_AUDIO_MIME = 'audio/mp4; codecs="mp4a.40.2"';
 const MP3_MIME = 'audio/mpeg';
+
+const RESOLUTION_PRESET_SCALE: Record<Exclude<VideoResolutionPreset, 'original'>, { width: number; height: number }> = {
+  '1080p': { width: 1920, height: 1080 },
+  '720p': { width: 1280, height: 720 },
+  '480p': { width: 854, height: 480 },
+};
 
 export interface TranscodeResult {
   blob: Blob;
@@ -232,6 +238,12 @@ export class FFmpegService {
         '-pix_fmt',
         'yuv420p',
       );
+      if (request.targetResolution !== 'original') {
+        args.push(
+          '-vf',
+          this.buildScaleFilter(request.targetResolution),
+        );
+      }
       if (request.includeAudio) {
         args.push('-c:a', 'aac', '-b:a', '128k');
       } else {
@@ -375,6 +387,11 @@ export class FFmpegService {
     }
 
     return request.kind === 'audio-mp3' ? `${baseName}.audio.mp3` : `${baseName}.audio.m4a`;
+  }
+
+  private buildScaleFilter(preset: Exclude<VideoResolutionPreset, 'original'>): string {
+    const target = RESOLUTION_PRESET_SCALE[preset];
+    return `scale=${target.width}:${target.height}:force_original_aspect_ratio=decrease:force_divisible_by=2`;
   }
 
   private isAbortError(error: unknown): boolean {

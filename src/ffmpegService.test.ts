@@ -98,6 +98,7 @@ describe('FFmpegService temp file cleanup', () => {
       codecMode: 'copy-when-possible',
       includeAudio: true,
       crf: 34,
+      targetResolution: 'original',
     };
 
     const result = await service.exportVideo(new File(['x'], 'clip.mov', { type: 'video/quicktime' }), request);
@@ -125,6 +126,7 @@ describe('FFmpegService temp file cleanup', () => {
       codecMode: 'reencode',
       includeAudio: false,
       crf: 28,
+      targetResolution: 'original',
     };
 
     const result = await service.exportVideo(new File(['x'], 'clip.mov', { type: 'video/quicktime' }), request);
@@ -144,6 +146,36 @@ describe('FFmpegService temp file cleanup', () => {
         '-movflags',
         'faststart',
         '/output.mp4',
+      ]),
+      -1,
+      expect.objectContaining({ signal: expect.any(AbortSignal) }),
+    );
+  });
+
+  it('adds scale filter for video export resolution presets', async () => {
+    const fakeFfmpeg: FakeFFmpeg = {
+      exec: vi.fn().mockResolvedValue(undefined),
+      readFile: vi.fn().mockResolvedValue(new Uint8Array([1, 2, 3])),
+      writeFile: vi.fn().mockResolvedValue(undefined),
+      deleteFile: vi.fn().mockResolvedValue(undefined),
+      terminate: vi.fn(),
+    };
+    const service = createServiceWithFakeInstance(fakeFfmpeg);
+    const request: VideoExportOptions = {
+      kind: 'video-mp4',
+      trimRange: { startSec: 0, endSec: 12 },
+      codecMode: 'reencode',
+      includeAudio: true,
+      crf: 34,
+      targetResolution: '720p',
+    };
+
+    await service.exportVideo(new File(['x'], 'clip.mov', { type: 'video/quicktime' }), request);
+
+    expect(fakeFfmpeg.exec).toHaveBeenCalledWith(
+      expect.arrayContaining([
+        '-vf',
+        'scale=1280:720:force_original_aspect_ratio=decrease:force_divisible_by=2',
       ]),
       -1,
       expect.objectContaining({ signal: expect.any(AbortSignal) }),

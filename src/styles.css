@@ -321,6 +321,7 @@ select:focus-visible,
   padding: 0;
   background: #0b0b0c;
   border-top: 1px solid var(--border);
+  overflow-y: auto;
 }
 
 .timeline-wrap {
@@ -427,6 +428,7 @@ select:focus-visible,
   padding: 14px 16px 16px;
   display: grid;
   gap: 14px;
+  flex: 0 0 auto;
 }
 
 .editor-panel-head {
@@ -852,6 +854,12 @@ dd {
 
   .editor-actions {
     flex-direction: column;
+  }
+}
+
+@media (max-height: 860px) {
+  .viewer-overlay {
+    max-height: 45vh;
   }
 }
 

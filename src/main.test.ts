@@ -725,6 +725,37 @@ describe('main ui', () => {
     expect(revokeObjectUrlSpy).toHaveBeenCalled();
   });
 
+  it('shows and applies resolution preset only for video re-encode', async () => {
+    await loadMain();
+
+    const videoInput = document.querySelector<HTMLInputElement>('#open-file-input')!;
+    await userEvent.upload(videoInput, new File(['123456'], 'clip.mp4', { type: 'video/mp4' }));
+    await userEvent.click(document.querySelector<HTMLButtonElement>('#edit-mode-button')!);
+
+    const resolutionField = document.querySelector<HTMLElement>('#video-resolution-field')!;
+    const resolutionSelect = document.querySelector<HTMLSelectElement>('#video-resolution-select')!;
+    const codecModeSelect = document.querySelector<HTMLSelectElement>('#video-codec-mode-select')!;
+    const exportKindSelect = document.querySelector<HTMLSelectElement>('#export-kind-select')!;
+
+    expect(resolutionField.hidden).toBe(false);
+    expect(resolutionSelect.disabled).toBe(false);
+
+    resolutionSelect.value = '720p';
+    resolutionSelect.dispatchEvent(new Event('change', { bubbles: true }));
+
+    await waitFor(() => {
+      expect(document.querySelector<HTMLElement>('#editor-status-text')?.textContent).toContain('720p');
+    });
+
+    codecModeSelect.value = 'copy-when-possible';
+    codecModeSelect.dispatchEvent(new Event('change', { bubbles: true }));
+    expect(resolutionSelect.disabled).toBe(true);
+
+    exportKindSelect.value = 'audio-m4a';
+    exportKindSelect.dispatchEvent(new Event('change', { bubbles: true }));
+    expect(resolutionField.hidden).toBe(true);
+  });
+
   it('allows stopping the current export', async () => {
     ffmpegServiceMocks.exportVideo.mockImplementationOnce(
       () =>
